@@ -27,6 +27,62 @@ function pm_boot(): void {
     if (!empty($c['cookie_secure'])) {
         header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
     }
+    pm_csrf_check();
+}
+
+// Defense-in-depth CSRF guard. SameSite=Lax already blocks most cross-site
+// POSTs; this rejects mutating requests whose Origin/Referer host clearly does
+// not match the host we're served on. It is deliberately LENIENT: if neither
+// header is present (some legitimate same-origin clients omit them) we allow,
+// so this never breaks first-party use or the installer's form posts.
+function pm_csrf_check(): void {
+    $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    if (in_array($method, ['GET', 'HEAD', 'OPTIONS'], true)) return;
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if ($host === '') return;
+    $candidate = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
+    if ($candidate === '') return; // lenient: no header to check
+    $h = parse_url($candidate, PHP_URL_HOST);
+    if ($h === null || $h === false) return;
+    // Compare hosts (ignore port differences which proxies sometimes rewrite).
+    $hostOnly = preg_replace('/:\d+$/', '', $host);
+    if (strcasecmp($h, $hostOnly) !== 0) {
+        pm_error('Cross-origin request blocked', 403);
+    }
+}
+
+// Lightweight file-based rate limiter (no schema, no cron). Returns true if the
+// caller is still under the limit (and records this attempt), false if blocked.
+// Best-effort: any I/O problem fails OPEN so we never lock out real users.
+function pm_rate_limit(string $key, int $max, int $window): bool {
+    try {
+        $dir = __DIR__ . '/../storage/ratelimit';
+        if (!is_dir($dir)) @mkdir($dir, 0700, true);
+        $file = $dir . '/' . sha1($key) . '.json';
+        $now = time();
+        $fp = @fopen($file, 'c+');
+        if (!$fp) return true;
+        @flock($fp, LOCK_EX);
+        $raw = stream_get_contents($fp);
+        $j = json_decode($raw ?: '', true);
+        $data = (is_array($j) && isset($j['reset']) && (int)$j['reset'] > $now)
+            ? $j : ['count' => 0, 'reset' => $now + $window];
+        $data['count'] = (int)$data['count'] + 1;
+        $allowed = $data['count'] <= $max;
+        ftruncate($fp, 0);
+        rewind($fp);
+        fwrite($fp, json_encode($data));
+        @flock($fp, LOCK_UN);
+        fclose($fp);
+        return $allowed;
+    } catch (Throwable $_) {
+        return true;
+    }
+}
+
+// Best-effort client IP for throttling keys.
+function pm_client_ip(): string {
+    return (string)($_SERVER['REMOTE_ADDR'] ?? 'cli');
 }
 
 function pm_method(): string {

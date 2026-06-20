@@ -146,7 +146,10 @@ function pm_install_schema(): void {
             description TEXT,
             priority TINYINT NOT NULL DEFAULT 2,
             due DATE NULL,
+            start_date DATE NULL,
             estimate VARCHAR(32) NULL,
+            position DOUBLE NOT NULL DEFAULT 0,
+            milestone_id INT NULL,
             recurring_rule_id INT NULL,
             created_by INT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -154,6 +157,9 @@ function pm_install_schema(): void {
             INDEX idx_status (status),
             INDEX idx_project (project_id),
             INDEX idx_recurring (recurring_rule_id),
+            INDEX idx_task_position (project_id, status, position),
+            INDEX idx_task_start (start_date),
+            INDEX idx_task_milestone (milestone_id),
             CONSTRAINT fk_tasks_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
@@ -266,6 +272,131 @@ function pm_install_schema(): void {
             CONSTRAINT fk_ta_task_attachment FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
             CONSTRAINT fk_ta_user_attachment FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2: planning & scheduling -------------------------------------
+        "CREATE TABLE IF NOT EXISTS task_dependencies (
+            task_id INT NOT NULL,
+            depends_on_id INT NOT NULL,
+            type VARCHAR(16) NOT NULL DEFAULT 'finish_start',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (task_id, depends_on_id),
+            INDEX idx_dep_dependson (depends_on_id),
+            CONSTRAINT fk_dep_task      FOREIGN KEY (task_id)       REFERENCES tasks(id) ON DELETE CASCADE,
+            CONSTRAINT fk_dep_dependson FOREIGN KEY (depends_on_id) REFERENCES tasks(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS milestones (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            project_id INT NOT NULL,
+            name VARCHAR(120) NOT NULL,
+            description TEXT NULL,
+            due DATE NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'open',
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_ms_project (project_id),
+            CONSTRAINT fk_ms_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2: time tracking & custom fields -----------------------------
+        "CREATE TABLE IF NOT EXISTS time_entries (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            task_id INT NOT NULL,
+            user_id INT NULL,
+            minutes INT NOT NULL DEFAULT 0,
+            note VARCHAR(255) NULL,
+            spent_on DATE NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_te_task (task_id),
+            INDEX idx_te_user (user_id),
+            CONSTRAINT fk_te_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            CONSTRAINT fk_te_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS custom_fields (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            project_id INT NULL,
+            name VARCHAR(80) NOT NULL,
+            field_type VARCHAR(16) NOT NULL DEFAULT 'text',
+            options_json TEXT NULL,
+            sort_order INT NOT NULL DEFAULT 0,
+            archived TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_cf_project (project_id),
+            CONSTRAINT fk_cf_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS task_custom_values (
+            task_id INT NOT NULL,
+            field_id INT NOT NULL,
+            value TEXT NULL,
+            PRIMARY KEY (task_id, field_id),
+            INDEX idx_tcv_field (field_id),
+            CONSTRAINT fk_tcv_task  FOREIGN KEY (task_id)  REFERENCES tasks(id)         ON DELETE CASCADE,
+            CONSTRAINT fk_tcv_field FOREIGN KEY (field_id) REFERENCES custom_fields(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2: notifications, mentions, watchers, reminders, reactions ----
+        "CREATE TABLE IF NOT EXISTS notifications (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            actor_id INT NULL,
+            task_id INT NULL,
+            type VARCHAR(32) NOT NULL,
+            body VARCHAR(500) NULL,
+            is_read TINYINT(1) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_notif_user_read (user_id, is_read),
+            INDEX idx_notif_task (task_id),
+            CONSTRAINT fk_notif_user  FOREIGN KEY (user_id)  REFERENCES users(id) ON DELETE CASCADE,
+            CONSTRAINT fk_notif_actor FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL,
+            CONSTRAINT fk_notif_task  FOREIGN KEY (task_id)  REFERENCES tasks(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS comment_mentions (
+            comment_id INT NOT NULL,
+            user_id INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (comment_id, user_id),
+            INDEX idx_cmnt_user (user_id),
+            CONSTRAINT fk_cmnt_comment FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+            CONSTRAINT fk_cmnt_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS task_watchers (
+            task_id INT NOT NULL,
+            user_id INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (task_id, user_id),
+            INDEX idx_watch_user (user_id),
+            CONSTRAINT fk_watch_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            CONSTRAINT fk_watch_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS reminders (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            task_id INT NOT NULL,
+            user_id INT NULL,
+            remind_at DATETIME NOT NULL,
+            channel VARCHAR(16) NOT NULL DEFAULT 'inapp',
+            sent_at DATETIME NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_rem_due (sent_at, remind_at),
+            INDEX idx_rem_task (task_id),
+            CONSTRAINT fk_rem_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            CONSTRAINT fk_rem_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS comment_reactions (
+            comment_id INT NOT NULL,
+            user_id INT NOT NULL,
+            emoji VARCHAR(32) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (comment_id, user_id, emoji),
+            INDEX idx_react_comment (comment_id),
+            CONSTRAINT fk_react_comment FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+            CONSTRAINT fk_react_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     foreach ($sql as $q) $pdo->exec($q);
 
@@ -300,6 +431,22 @@ function pm_install_schema(): void {
         'task_attachments', 'fk_ta_user_attachment',
         'FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL'
     );
+
+    // --- v2 additive columns on tasks (new tables above are created by the
+    //     CREATE TABLE IF NOT EXISTS loop and need no migration) ------------
+    pm_migrate_add_column_if_missing('tasks', 'start_date',   'DATE NULL');
+    pm_migrate_add_column_if_missing('tasks', 'position',     'DOUBLE NOT NULL DEFAULT 0');
+    pm_migrate_add_column_if_missing('tasks', 'milestone_id', 'INT NULL');
+    pm_migrate_add_index_if_missing('tasks', 'idx_task_position', '(project_id, status, position)');
+    pm_migrate_add_index_if_missing('tasks', 'idx_task_start',    '(start_date)');
+    pm_migrate_add_index_if_missing('tasks', 'idx_task_milestone','(milestone_id)');
+    // Backfill position from id so existing tasks have a stable initial order.
+    try {
+        $row = pm_fetch_one("SELECT COUNT(*) AS c FROM tasks WHERE position <> 0");
+        if ($row && (int)$row['c'] === 0) {
+            pm_db()->exec("UPDATE tasks SET position = id WHERE position = 0");
+        }
+    } catch (Throwable $_) { /* best effort */ }
 }
 
 // Add a column to $table if it's not already there. Swallows errors so that

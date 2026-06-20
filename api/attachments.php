@@ -66,7 +66,9 @@ function pm_upload_attachment(int $taskId): void {
         pm_error('Could not persist uploaded file', 500);
     }
 
-    $mime = trim((string)($f['type'] ?? 'application/octet-stream'));
+    // Sniff the real MIME from the stored bytes; ignore the client-sent type.
+    // Non-allowlisted (or svg) content is recorded as application/octet-stream.
+    $mime = pm_attachment_sniff_mime($dest, $ext);
     if ($mime === '') $mime = 'application/octet-stream';
 
     try {
@@ -106,9 +108,16 @@ function pm_download_attachment(int $id): void {
     $path = pm_attachment_abs_path((string)$row['stored_name']);
     if (!is_file($path)) pm_error('File missing on disk', 410);
 
+    // Only echo the stored MIME for allow-listed, safe types. Everything else
+    // (unknown, svg, octet-stream) is forced to octet-stream so the browser
+    // can't be tricked into rendering/executing it inline.
+    $stored = (string)($row['mime_type'] ?: '');
+    $serveType = pm_attachment_is_serveable_mime($stored) ? $stored : 'application/octet-stream';
+
     while (ob_get_level() > 0) ob_end_clean();
     http_response_code(200);
-    header('Content-Type: ' . ($row['mime_type'] ?: 'application/octet-stream'));
+    header('Content-Type: ' . $serveType);
+    header('X-Content-Type-Options: nosniff');
     header('Content-Length: ' . (string)filesize($path));
     header('Content-Disposition: attachment; filename="' . pm_content_disposition_name((string)$row['original_name']) . '"');
     header('Cache-Control: private, no-store');
@@ -117,8 +126,17 @@ function pm_download_attachment(int $id): void {
 }
 
 function pm_delete_attachment(int $id): void {
-    $row = pm_fetch_one('SELECT id, stored_name FROM task_attachments WHERE id = ?', [$id]);
+    $row = pm_fetch_one('SELECT id, stored_name, uploaded_by FROM task_attachments WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
+
+    $uid = pm_current_user_id();
+    $uploader = ($row['uploaded_by'] !== null) ? (int)$row['uploaded_by'] : null;
+    $me = pm_current_user();
+    $isAdmin = $me && !empty($me['is_admin']);
+    if (!$isAdmin && ($uploader === null || $uploader !== $uid)) {
+        pm_error('Forbidden', 403);
+    }
+
     pm_exec('DELETE FROM task_attachments WHERE id = ?', [$id]);
     pm_attachment_delete_file((string)$row['stored_name']);
     pm_json(['ok' => true]);

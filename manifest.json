@@ -1,0 +1,19 @@
+{
+  "name": "Castle Tech Tasks",
+  "short_name": "Castle Tasks",
+  "description": "Project & task management for the Castle Fun Center tech team.",
+  "start_url": "index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0B0F17",
+  "theme_color": "#0B0F17",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

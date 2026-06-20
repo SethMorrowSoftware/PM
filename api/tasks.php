@@ -2,6 +2,7 @@
 require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/slack_client.php';
 require_once __DIR__ . '/attachments_lib.php';
+require_once __DIR__ . '/notify_lib.php';
 pm_boot();
 pm_require_auth();
 
@@ -17,10 +18,28 @@ if (isset($_GET['bulk'])) {
 
 // Sub-routes
 if ($id !== null && isset($_GET['comments'])) {
+    // Reaction toggle lives under the comments namespace so it travels with the
+    // comment it targets: ?id=N&comments=1&comment_id=M&reaction=:emoji:
+    if ($commentId !== null && isset($_GET['reaction'])) {
+        if ($method === 'POST')   pm_add_reaction($id, $commentId, (string)$_GET['reaction']);
+        if ($method === 'DELETE') pm_remove_reaction($id, $commentId, (string)$_GET['reaction']);
+        pm_error('Method not allowed', 405);
+    }
     if ($method === 'GET')  pm_list_comments($id);
     if ($method === 'POST') pm_add_comment($id);
     if ($method === 'PATCH' && $commentId !== null) pm_update_comment($id, $commentId);
     if ($method === 'DELETE' && $commentId !== null) pm_delete_comment($id, $commentId);
+    pm_error('Method not allowed', 405);
+}
+
+if ($id !== null && isset($_GET['watch'])) {
+    if ($method === 'POST')   pm_watch_task($id);
+    if ($method === 'DELETE') pm_unwatch_task($id);
+    pm_error('Method not allowed', 405);
+}
+
+if ($id !== null && isset($_GET['activity'])) {
+    if ($method === 'GET') pm_task_activity($id);
     pm_error('Method not allowed', 405);
 }
 
@@ -75,6 +94,12 @@ function pm_task_base_shape(array $t): array {
         'priority'    => (int)$t['priority'],
         'due'         => $t['due'],
         'estimate'    => $t['estimate'],
+        // v2 scheduling fields. position is a DOUBLE so the kanban/list views can
+        // splice a task between two neighbours without renumbering everything.
+        'start_date'  => $t['start_date'] ?? null,
+        'position'    => isset($t['position']) ? (float)$t['position'] : 0.0,
+        'milestone_id'=> isset($t['milestone_id']) && $t['milestone_id'] !== null
+            ? (int)$t['milestone_id'] : null,
         'recurring_rule_id' => isset($t['recurring_rule_id']) && $t['recurring_rule_id'] !== null
             ? (int)$t['recurring_rule_id'] : null,
         'labels'      => [],
@@ -82,6 +107,12 @@ function pm_task_base_shape(array $t): array {
         'subtasks'    => [],
         'comments'    => 0,
         'attachments' => 0,
+        // v2 enrichment (filled by the batch loader / single-row loader).
+        'watchers'    => [],
+        'blocked_by'  => [],
+        'blocks'      => [],
+        'time_logged' => 0,
+        'custom'      => (object)[],
         'created_at'  => $t['created_at'],
         'updated_at'  => $t['updated_at'],
     ];
@@ -104,6 +135,24 @@ function pm_task_row_to_shape(array $t): array {
     $shape['comments']  = (int)$cmtRow['c'];
     $attRow = pm_fetch_one('SELECT COUNT(*) AS c FROM task_attachments WHERE task_id = ?', [$t['id']]);
     $shape['attachments'] = (int)($attRow['c'] ?? 0);
+
+    // v2 enrichment. Cheap single-row queries — this path is only hit after a
+    // create/update/get of one task, not in the list loop.
+    $tid = (int)$t['id'];
+    $watchers = pm_fetch_all('SELECT user_id FROM task_watchers WHERE task_id = ?', [$tid]);
+    $shape['watchers'] = array_map(fn($r) => (int)$r['user_id'], $watchers);
+    // task_dependencies.task_id depends_on depends_on_id → this task is
+    // blocked_by depends_on_id; rows where we are the depends_on are tasks we block.
+    $blockedBy = pm_fetch_all('SELECT depends_on_id FROM task_dependencies WHERE task_id = ?', [$tid]);
+    $shape['blocked_by'] = array_map(fn($r) => (int)$r['depends_on_id'], $blockedBy);
+    $blocks = pm_fetch_all('SELECT task_id FROM task_dependencies WHERE depends_on_id = ?', [$tid]);
+    $shape['blocks'] = array_map(fn($r) => (int)$r['task_id'], $blocks);
+    $timeRow = pm_fetch_one('SELECT COALESCE(SUM(minutes),0) AS m FROM time_entries WHERE task_id = ?', [$tid]);
+    $shape['time_logged'] = (int)($timeRow['m'] ?? 0);
+    $cvals = pm_fetch_all('SELECT field_id, value FROM task_custom_values WHERE task_id = ?', [$tid]);
+    $custom = [];
+    foreach ($cvals as $r) $custom[(string)(int)$r['field_id']] = $r['value'];
+    $shape['custom'] = (object)$custom;
     return $shape;
 }
 
@@ -120,6 +169,11 @@ function pm_list_tasks(): void {
     $subsByTask      = [];
     $commentsByTask  = [];
     $attachmentsByTask = [];
+    $watchersByTask  = [];
+    $blockedByTask   = [];
+    $blocksByTask    = [];
+    $timeByTask      = [];
+    $customByTask    = [];
 
     foreach (pm_fetch_all("SELECT task_id, label_id FROM task_labels WHERE task_id IN ($ph)", $ids) as $r) {
         $labelsByTask[(int)$r['task_id']][] = (int)$r['label_id'];
@@ -144,6 +198,24 @@ function pm_list_tasks(): void {
     foreach (pm_fetch_all("SELECT task_id, COUNT(*) AS c FROM task_attachments WHERE task_id IN ($ph) GROUP BY task_id", $ids) as $r) {
         $attachmentsByTask[(int)$r['task_id']] = (int)$r['c'];
     }
+    // v2 batched enrichment — one query per table, bucketed in PHP (no N+1).
+    foreach (pm_fetch_all("SELECT task_id, user_id FROM task_watchers WHERE task_id IN ($ph)", $ids) as $r) {
+        $watchersByTask[(int)$r['task_id']][] = (int)$r['user_id'];
+    }
+    // blocked_by: rows keyed on our task_id point at the task we depend on.
+    foreach (pm_fetch_all("SELECT task_id, depends_on_id FROM task_dependencies WHERE task_id IN ($ph)", $ids) as $r) {
+        $blockedByTask[(int)$r['task_id']][] = (int)$r['depends_on_id'];
+    }
+    // blocks: rows where we are the dependency point back at the dependent task.
+    foreach (pm_fetch_all("SELECT task_id, depends_on_id FROM task_dependencies WHERE depends_on_id IN ($ph)", $ids) as $r) {
+        $blocksByTask[(int)$r['depends_on_id']][] = (int)$r['task_id'];
+    }
+    foreach (pm_fetch_all("SELECT task_id, COALESCE(SUM(minutes),0) AS m FROM time_entries WHERE task_id IN ($ph) GROUP BY task_id", $ids) as $r) {
+        $timeByTask[(int)$r['task_id']] = (int)$r['m'];
+    }
+    foreach (pm_fetch_all("SELECT task_id, field_id, value FROM task_custom_values WHERE task_id IN ($ph)", $ids) as $r) {
+        $customByTask[(int)$r['task_id']][(string)(int)$r['field_id']] = $r['value'];
+    }
 
     $out = [];
     foreach ($rows as $t) {
@@ -154,6 +226,11 @@ function pm_list_tasks(): void {
         $shape['subtasks']  = $subsByTask[$id]      ?? [];
         $shape['comments']  = $commentsByTask[$id]  ?? 0;
         $shape['attachments'] = $attachmentsByTask[$id] ?? 0;
+        $shape['watchers']    = $watchersByTask[$id]    ?? [];
+        $shape['blocked_by']  = $blockedByTask[$id]     ?? [];
+        $shape['blocks']      = $blocksByTask[$id]      ?? [];
+        $shape['time_logged'] = $timeByTask[$id]        ?? 0;
+        $shape['custom']      = (object)($customByTask[$id] ?? []);
         $out[] = $shape;
     }
     pm_json(['tasks' => $out]);
@@ -216,6 +293,8 @@ function pm_create_task(): void {
     if ($priority < 0 || $priority > 3) pm_error('Invalid priority');
     $due      = pm_param('due');
     if ($due !== null && $due !== '' && !pm_is_valid_date((string)$due)) pm_error('Invalid due date');
+    $startDate = pm_param('start_date');
+    if ($startDate !== null && $startDate !== '' && !pm_is_valid_date((string)$startDate)) pm_error('Invalid start date');
     $estimate = pm_param('estimate');
     if ($estimate !== null && mb_strlen((string)$estimate) > 32) pm_error('Estimate is too long');
     $desc     = pm_param('description');
@@ -226,6 +305,21 @@ function pm_create_task(): void {
     $proj = pm_fetch_one('SELECT * FROM projects WHERE id = ?', [$project]);
     if (!$proj) pm_error('Invalid project');
     if (!empty($proj['archived'])) pm_error('Cannot create tasks in an archived project', 409);
+
+    // milestone_id: optional; must belong to the same project when supplied.
+    $milestoneId = pm_milestone_id_for_project(pm_param('milestone_id'), $project);
+
+    // position: explicit double if given, else next slot for this project+status.
+    $positionRaw = pm_param('position');
+    if ($positionRaw !== null && $positionRaw !== '') {
+        $position = (float)$positionRaw;
+    } else {
+        $maxPos = pm_fetch_one(
+            'SELECT COALESCE(MAX(position), 0) AS m FROM tasks WHERE project_id = ? AND status = ?',
+            [$project, $status]
+        );
+        $position = (float)($maxPos['m'] ?? 0) + 1;
+    }
 
     $labels = pm_validate_label_ids_for_project($labels, $project);
     $assignees = pm_validate_assignee_ids($assignees);
@@ -247,9 +341,11 @@ function pm_create_task(): void {
         $ref = $prefix . '-' . $next;
         try {
             pm_exec(
-                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, estimate, created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?)',
-                [$ref, $project, $status, $title, $desc ?: null, $priority, $due ?: null, $estimate ?: null, pm_current_user_id()]
+                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, start_date, position, milestone_id, estimate, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                [$ref, $project, $status, $title, $desc ?: null, $priority, $due ?: null,
+                 ($startDate !== null && $startDate !== '') ? $startDate : null,
+                 $position, $milestoneId, $estimate ?: null, pm_current_user_id()]
             );
             $tid = pm_last_id();
             break;
@@ -283,6 +379,21 @@ function pm_create_task(): void {
         pm_error('Failed to create task metadata.', 500);
     }
     $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$tid]);
+
+    // v2 in-app notifications. Best-effort: a notify failure must never turn a
+    // successful create into a 500, so each block is independently guarded.
+    $actor = pm_current_user_id();
+    try {
+        pm_add_watchers($tid, array_merge([$actor], $assignees));
+    } catch (Throwable $_) { /* best effort */ }
+    foreach ($assignees as $uid) {
+        try {
+            if ((int)$uid === (int)$actor) continue;
+            pm_notify((int)$uid, $actor, $tid, 'assigned',
+                pm_assigned_body($actor, $t));
+        } catch (Throwable $_) { /* best effort */ }
+    }
+
     pm_slack_notify_task_event($t, $proj, 'task_created', 'created this task');
     pm_json(['task' => pm_task_row_to_shape($t)]);
 }
@@ -322,6 +433,9 @@ function pm_update_task(int $id): void {
     if (array_key_exists('due', $body) && $body['due'] !== null && $body['due'] !== '' && !pm_is_valid_date((string)$body['due'])) {
         pm_error('Invalid due date');
     }
+    if (array_key_exists('start_date', $body) && $body['start_date'] !== null && $body['start_date'] !== '' && !pm_is_valid_date((string)$body['start_date'])) {
+        pm_error('Invalid start date');
+    }
     if (array_key_exists('estimate', $body) && $body['estimate'] !== null && mb_strlen((string)$body['estimate']) > 32) {
         pm_error('Estimate is too long');
     }
@@ -335,7 +449,7 @@ function pm_update_task(int $id): void {
 
     $fields = [];
     $params = [];
-    foreach (['title','description','status','estimate','due'] as $col) {
+    foreach (['title','description','status','estimate','due','start_date'] as $col) {
         if (array_key_exists($col, $body)) {
             $fields[] = "$col = ?";
             $params[] = $body[$col] === '' ? null : $body[$col];
@@ -344,6 +458,17 @@ function pm_update_task(int $id): void {
     if (array_key_exists('priority', $body)) {
         $fields[] = 'priority = ?';
         $params[] = (int)$body['priority'];
+    }
+    if (array_key_exists('position', $body)) {
+        $fields[] = 'position = ?';
+        $params[] = (float)$body['position'];
+    }
+    // milestone_id: null clears it; otherwise must belong to the task's project
+    // (or the project it's being moved into in the same PATCH).
+    if (array_key_exists('milestone_id', $body)) {
+        $msProject = array_key_exists('project', $body) ? (int)$body['project'] : (int)$t['project_id'];
+        $fields[] = 'milestone_id = ?';
+        $params[] = pm_milestone_id_for_project($body['milestone_id'], $msProject);
     }
     if (array_key_exists('project', $body)) {
         $nextProjectId = (int)$body['project'];
@@ -408,7 +533,62 @@ function pm_update_task(int $id): void {
         pm_slack_notify_task_event($t, $proj, 'task_assigned', $verb);
     }
 
+    // v2 in-app notifications (best-effort; never break the PATCH).
+    $actor = pm_current_user_id();
+    // Newly assigned users become watchers and get an 'assigned' notification.
+    foreach ($newlyAssigned as $uid) {
+        try { pm_add_watchers($id, [(int)$uid]); } catch (Throwable $_) {}
+        try {
+            pm_notify((int)$uid, $actor, $id, 'assigned', pm_assigned_body($actor, $t));
+        } catch (Throwable $_) {}
+    }
+    // Real transition into done: ping recipients, and surface to watchers of any
+    // task this one was blocking (it's now potentially unblocked).
+    if ($prevStatus !== 'done' && $t['status'] === 'done') {
+        try {
+            $body = pm_actor_name($actor) . ' completed ' . $t['ref'] . ' ' . $t['title'];
+            pm_notify_users(pm_task_recipients($id, $actor), $actor, $id, 'status', $body);
+        } catch (Throwable $_) {}
+        try { pm_notify_unblocked($id, $actor); } catch (Throwable $_) {}
+    }
+
     pm_json(['task' => pm_task_row_to_shape($t)]);
+}
+
+// Notify watchers of tasks that were blocked by $completedTaskId — those tasks
+// may now be unblocked. We notify watchers (∪ assignees) of each dependent task.
+function pm_notify_unblocked(int $completedTaskId, ?int $actorId): void {
+    $deps = pm_fetch_all('SELECT task_id FROM task_dependencies WHERE depends_on_id = ?', [$completedTaskId]);
+    foreach ($deps as $d) {
+        $depTaskId = (int)$d['task_id'];
+        if ($depTaskId <= 0) continue;
+        $dep = pm_fetch_one('SELECT ref, title FROM tasks WHERE id = ?', [$depTaskId]);
+        if (!$dep) continue;
+        $body = ($dep['ref'] ?? ('#' . $depTaskId)) . ' ' . ($dep['title'] ?? '') . ' is no longer blocked';
+        pm_notify_users(pm_task_recipients($depTaskId, $actorId), $actorId, $depTaskId, 'dependency', $body);
+    }
+}
+
+// Helper: human "<actor> assigned you <ref> <title>" body for assignment pings.
+function pm_assigned_body(?int $actorId, array $task): string {
+    return pm_actor_name($actorId) . ' assigned you ' . ($task['ref'] ?? ('#' . (int)$task['id'])) . ' ' . ($task['title'] ?? '');
+}
+
+function pm_actor_name(?int $actorId): string {
+    if (!$actorId) return 'Someone';
+    $u = pm_fetch_one('SELECT name FROM users WHERE id = ?', [$actorId]);
+    return $u['name'] ?? 'Someone';
+}
+
+// Resolve+validate a milestone id against a project. Accepts null/'' → null.
+// Rejects a milestone that doesn't exist or belongs to a different project.
+function pm_milestone_id_for_project($raw, int $projectId): ?int {
+    if ($raw === null || $raw === '') return null;
+    $mid = (int)$raw;
+    if ($mid <= 0) return null;
+    $ms = pm_fetch_one('SELECT id FROM milestones WHERE id = ? AND project_id = ?', [$mid, $projectId]);
+    if (!$ms) pm_error('Invalid milestone for this project', 409);
+    return $mid;
 }
 
 function pm_delete_task(int $id): void {
@@ -478,8 +658,99 @@ function pm_delete_subtask(int $taskId, int $subId): void {
     pm_json(['ok' => true]);
 }
 
+// ---- watchers ----
+function pm_watchers_for(int $taskId): array {
+    $rows = pm_fetch_all('SELECT user_id FROM task_watchers WHERE task_id = ? ORDER BY user_id', [$taskId]);
+    return array_map(fn($r) => (int)$r['user_id'], $rows);
+}
+
+function pm_watch_task(int $taskId): void {
+    $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
+    if (!$task) pm_error('Task not found', 404);
+    pm_add_watchers($taskId, [pm_current_user_id()]);
+    pm_json(['ok' => true, 'watchers' => pm_watchers_for($taskId)]);
+}
+
+function pm_unwatch_task(int $taskId): void {
+    $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
+    if (!$task) pm_error('Task not found', 404);
+    pm_exec('DELETE FROM task_watchers WHERE task_id = ? AND user_id = ?', [$taskId, pm_current_user_id()]);
+    pm_json(['ok' => true, 'watchers' => pm_watchers_for($taskId)]);
+}
+
+// ---- task-scoped activity (drawer timeline) ----
+function pm_task_activity(int $taskId): void {
+    $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
+    if (!$task) pm_error('Task not found', 404);
+    // Mirror api/activity.php's row shape, scoped to this task, newest first.
+    $rows = pm_fetch_all(
+        "SELECT a.id, a.action, a.detail, a.created_at,
+                a.user_id, u.name AS user_name, u.initials, u.color,
+                a.task_id, t.ref AS task_ref, t.title AS task_title
+         FROM activity a
+         LEFT JOIN users u ON u.id = a.user_id
+         LEFT JOIN tasks t ON t.id = a.task_id
+         WHERE a.task_id = ?
+         ORDER BY a.id DESC
+         LIMIT 50",
+        [$taskId]
+    );
+    pm_json(['activity' => array_map(fn($r) => [
+        'id'         => (int)$r['id'],
+        'action'     => $r['action'],
+        'detail'     => $r['detail'],
+        'created_at' => $r['created_at'],
+        'user'       => [
+            'id'       => $r['user_id'] !== null ? (int)$r['user_id'] : null,
+            'name'     => $r['user_name'] ?? 'Former teammate',
+            'initials' => $r['initials']  ?? '??',
+            'color'    => $r['color']     ?? '#64748B',
+        ],
+        'task' => $r['task_id'] ? [
+            'id'    => (int)$r['task_id'],
+            'ref'   => $r['task_ref'],
+            'title' => $r['task_title'],
+        ] : null,
+    ], $rows)]);
+}
+
+// ---- comment reactions ----
+// Reactions are toggled per (comment, user, emoji). The emoji is bounded to the
+// VARCHAR(32) column so a malformed client can't overflow it.
+function pm_validate_reaction_emoji(string $emoji): string {
+    $emoji = trim($emoji);
+    if ($emoji === '') pm_error('Emoji required');
+    if (mb_strlen($emoji) > 32) pm_error('Emoji is too long');
+    return $emoji;
+}
+
+function pm_assert_comment(int $taskId, int $commentId): void {
+    $c = pm_fetch_one('SELECT id FROM comments WHERE id = ? AND task_id = ?', [$commentId, $taskId]);
+    if (!$c) pm_error('Comment not found', 404);
+}
+
+function pm_add_reaction(int $taskId, int $commentId, string $emoji): void {
+    $emoji = pm_validate_reaction_emoji($emoji);
+    pm_assert_comment($taskId, $commentId);
+    pm_exec(
+        'INSERT IGNORE INTO comment_reactions (comment_id, user_id, emoji) VALUES (?,?,?)',
+        [$commentId, pm_current_user_id(), $emoji]
+    );
+    pm_json(['ok' => true]);
+}
+
+function pm_remove_reaction(int $taskId, int $commentId, string $emoji): void {
+    $emoji = pm_validate_reaction_emoji($emoji);
+    pm_assert_comment($taskId, $commentId);
+    pm_exec(
+        'DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ? AND emoji = ?',
+        [$commentId, pm_current_user_id(), $emoji]
+    );
+    pm_json(['ok' => true]);
+}
+
 // ---- comments ----
-function pm_comment_shape(array $r): array {
+function pm_comment_shape(array $r, array $reactions = [], array $mentions = []): array {
     return [
         'id'         => (int)$r['id'],
         'body'       => $r['body'],
@@ -491,7 +762,22 @@ function pm_comment_shape(array $r): array {
             'initials' => $r['initials'] ?? '??',
             'color'    => $r['color']    ?? '#64748B',
         ],
+        'reactions'  => $reactions,
+        'mentions'   => $mentions,
     ];
+}
+
+// Build [{emoji, count, mine}] for one comment from already-fetched reaction
+// rows ([{emoji, user_id}, ...]). $me is the current user id for the `mine` flag.
+function pm_shape_reactions(array $rows, int $me): array {
+    $byEmoji = [];
+    foreach ($rows as $r) {
+        $emoji = (string)$r['emoji'];
+        if (!isset($byEmoji[$emoji])) $byEmoji[$emoji] = ['emoji' => $emoji, 'count' => 0, 'mine' => false];
+        $byEmoji[$emoji]['count']++;
+        if ((int)$r['user_id'] === $me) $byEmoji[$emoji]['mine'] = true;
+    }
+    return array_values($byEmoji);
 }
 
 function pm_comments_have_updated_at(): bool {
@@ -523,7 +809,30 @@ function pm_list_comments(int $taskId): void {
          WHERE c.task_id = ? ORDER BY c.id ASC",
         [$taskId]
     );
-    pm_json(['comments' => array_map('pm_comment_shape', $rows)]);
+    if (!$rows) { pm_json(['comments' => []]); return; }
+
+    // Batch-load reactions + mentions for all comments at once (no N+1).
+    $cids = array_map(fn($r) => (int)$r['id'], $rows);
+    $ph = implode(',', array_fill(0, count($cids), '?'));
+    $me = pm_current_user_id();
+    $reactByComment = [];
+    foreach (pm_fetch_all("SELECT comment_id, user_id, emoji FROM comment_reactions WHERE comment_id IN ($ph)", $cids) as $r) {
+        $reactByComment[(int)$r['comment_id']][] = $r;
+    }
+    $mentByComment = [];
+    foreach (pm_fetch_all("SELECT comment_id, user_id FROM comment_mentions WHERE comment_id IN ($ph)", $cids) as $r) {
+        $mentByComment[(int)$r['comment_id']][] = (int)$r['user_id'];
+    }
+    $out = [];
+    foreach ($rows as $r) {
+        $cid = (int)$r['id'];
+        $out[] = pm_comment_shape(
+            $r,
+            pm_shape_reactions($reactByComment[$cid] ?? [], $me),
+            $mentByComment[$cid] ?? []
+        );
+    }
+    pm_json(['comments' => $out]);
 }
 
 function pm_add_comment(int $taskId): void {
@@ -555,6 +864,29 @@ function pm_add_comment(int $taskId): void {
         pm_slack_notify_task_event($task, $proj, 'comment_added', 'commented', $body);
         pm_notify_mentions($task, $proj, $body);
     }
+
+    // v2 in-app notifications (best-effort).
+    $actor = pm_current_user_id();
+    $mentionIds = [];
+    try { $mentionIds = pm_resolve_mentions($body); } catch (Throwable $_) {}
+    try {
+        // Notify task recipients (assignees ∪ watchers) minus the actor, and
+        // minus anyone explicitly @-mentioned (they get a richer 'mention' ping).
+        $recipients = array_values(array_diff(pm_task_recipients($taskId, $actor), $mentionIds));
+        $cbody = pm_actor_name($actor) . ' commented on ' . ($task['ref'] ?? ('#' . $taskId)) . ': ' . mb_substr($body, 0, 200);
+        pm_notify_users($recipients, $actor, $taskId, 'comment', $cbody);
+    } catch (Throwable $_) {}
+    foreach ($mentionIds as $uid) {
+        $uid = (int)$uid;
+        if ($uid <= 0) continue;
+        try { pm_exec('INSERT IGNORE INTO comment_mentions (comment_id, user_id) VALUES (?,?)', [$cid, $uid]); } catch (Throwable $_) {}
+        try {
+            $mbody = pm_actor_name($actor) . ' mentioned you in ' . ($task['ref'] ?? ('#' . $taskId)) . ': ' . mb_substr($body, 0, 200);
+            pm_notify($uid, $actor, $taskId, 'mention', $mbody);
+        } catch (Throwable $_) {}
+        try { pm_add_watchers($taskId, [$uid]); } catch (Throwable $_) {}
+    }
+
     pm_json(['comment' => pm_comment_shape($r)]);
 }
 

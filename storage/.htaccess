@@ -1,1 +1,11 @@
-Require all denied
+# Deny all direct HTTP access to stored files (attachments, rate-limit data).
+# Downloads are streamed through api/attachments.php, never served directly.
+<IfModule mod_authz_core.c>
+    # Apache 2.4+
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    # Apache 2.2
+    Order Allow,Deny
+    Deny from all
+</IfModule>
