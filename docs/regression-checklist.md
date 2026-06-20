@@ -161,6 +161,51 @@ permission matrix above, and the Slack/recurring paths.
 
 ---
 
+## 9. v2 features (collaboration / planning / tracking / mobile / theme)
+
+Run after upgrading an existing install (re-run `install.php` to apply the
+additive migrations, then delete it). Each row: member vs admin where relevant.
+
+### 9.1 Notifications & collaboration
+- Assign a teammate to a task → they see a bell badge + a notification; clicking
+  it opens the task and marks it read. "Mark all read" clears the badge.
+- Comment with `@Name` → that user gets a `mention` notification; the rendered
+  comment highlights the mention. Non-mentioned watchers/assignees get a
+  `comment` notification (not the mentioned user twice).
+- React to a comment (emoji) → count updates, toggling off removes your reaction.
+- Watch/unwatch a task → you start/stop receiving its notifications.
+- Per-task **activity timeline** in the drawer shows status/assignee/comment history.
+- Due-soon: a task due today/tomorrow generates one `due_soon` notification per
+  assignee per day (lazy sweep on request; no cron).
+
+### 9.2 Planning & scheduling
+- Drag a card to reorder within/across Kanban columns (mouse AND touch); order
+  persists across reload (`tasks.position`). Same for List drag handle.
+- Add a dependency (blocked-by) in the drawer; attempting a self-link or a cycle
+  is rejected with a clear message.
+- Set a start date + due; the task renders as a **bar** on the Timeline view;
+  drag the bar to shift dates. Milestone (admin-created) groups tasks.
+
+### 9.3 Tracking & reporting
+- Log time on a task; total shows vs estimate; delete your own entry (admin can
+  delete any). Dashboard shows real week-over-week trends + charts.
+- Admin defines a custom field (e.g. select); it appears in the drawer and its
+  value persists. Non-admins can set values but not define fields (expect 403 on
+  POST `custom_fields.php`).
+
+### 9.4 Mobile, theme, PWA, security
+- On a phone width: List/Calendar/Dashboard reflow (no horizontal overflow);
+  Kanban/Calendar drag works by touch.
+- Theme toggle switches light/dark and persists; no flash on reload; auth pages
+  honor it. `prefers-color-scheme` applies when no explicit choice.
+- App is installable (manifest + service worker); offline shows the shell; API
+  calls are never served stale from cache.
+- Upload a `.svg`/unknown file → it downloads as `application/octet-stream`
+  (not rendered). Deleting an attachment you didn't upload → 403 unless admin.
+- Rapid wrong-password logins eventually return HTTP 429.
+
+---
+
 ## Phase tracking
 
 Each numbered phase in `PLAN.md` §15 adds specific coverage here:

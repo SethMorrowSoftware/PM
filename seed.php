@@ -144,8 +144,16 @@ function sp_seed_data(): array {
     $pdo->beginTransaction();
     try {
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
-        foreach (['task_attachments','saved_views','activity','comments','task_labels','task_assignees','subtasks','tasks','recurring_rules','labels','projects','users','app_settings'] as $tbl) {
-            $pdo->exec("TRUNCATE TABLE {$tbl}");
+        $truncate = [
+            // v2 tables first (children), then the original set.
+            'comment_reactions','comment_mentions','notifications','reminders','task_watchers',
+            'task_custom_values','custom_fields','time_entries','task_dependencies','milestones',
+            'task_attachments','saved_views','activity','comments','task_labels','task_assignees',
+            'subtasks','tasks','recurring_rules','labels','projects','users','app_settings',
+        ];
+        foreach ($truncate as $tbl) {
+            // Tolerate older installs that predate the v2 tables.
+            try { $pdo->exec("TRUNCATE TABLE {$tbl}"); } catch (Throwable $_) {}
         }
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
 
