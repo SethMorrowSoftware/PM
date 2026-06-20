@@ -24,6 +24,29 @@ The software is currently a full multi-view task manager with:
 - Task attachments with DB metadata + filesystem storage + upload/download/delete API
 - Slack integration API with event toggles, templates, test delivery, and delivery history fields
 
+## What's new in v2
+
+A major upgrade toward Monday/Asana-grade depth, still 100% no-build / cPanel-friendly:
+
+- **Collaboration** — in-app **notification center** (bell + unread badge,
+  polled), **@mentions** with autocomplete, comment **reactions**, task
+  **watchers/followers**, and a **per-task activity timeline** in the drawer.
+- **Planning & scheduling** — manual **drag-to-reorder** (touch + mouse) on the
+  Kanban board and List, **task dependencies** (blocked-by / blocks, cycle-safe),
+  **start dates**, a new **Timeline / Gantt view**, and **milestones**.
+- **Tracking & reporting** — **time logging** (vs. estimate), per-project
+  **custom fields**, and a **dashboard** with honest week-over-week trends and
+  inline throughput / time / milestone charts.
+- **Polish** — **light & dark themes** (toggle + OS preference), an accessible
+  dialog system (no more `prompt()`/`confirm()`), a refined design-token system,
+  and **mobile-first** reflow (List/Calendar/Dashboard) with touch drag-and-drop.
+- **Installable PWA** — `manifest.json` + service worker for an app-like,
+  offline-tolerant shell (the API is always fetched live).
+- **Hardening** — upload MIME sniffing + allow-list, attachment-delete
+  ownership, a CSRF origin check, and login/registration rate limiting.
+
+See `docs/V2-CONTRACT.md` for the full v2 implementation spec.
+
 For release validation coverage, see `docs/regression-checklist.md`.
 
 ## Tech stack
