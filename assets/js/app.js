@@ -41,6 +41,7 @@
     settingsOpen: false,
     mobileSidebarOpen: false,
     notifOpen: false,
+    shortcutsOpen: false,
     // v2 collections
     notifications: [],
     unread: 0,
@@ -49,6 +50,7 @@
     templates: [],
     // theme: explicit user choice ('dark'|'light'); null = follow OS
     theme: localStorage.getItem('pm_theme') || 'dark',
+    density: localStorage.getItem('pm_density') === 'compact' ? 'compact' : 'comfortable',
     // view-local UI state, LIFTED here so it survives full re-renders
     ui: {
       list:      { groupBy: 'status', sortBy: 'priority', sortDir: 'asc', collapsed: {}, selected: [] },
@@ -160,6 +162,11 @@
     try { localStorage.setItem('pm_theme', state.theme); } catch { /* ignore */ }
     renderApp();
   }
+  function toggleDensity() {
+    state.density = state.density === 'compact' ? 'comfortable' : 'compact';
+    try { localStorage.setItem('pm_density', state.density); } catch { /* ignore */ }
+    renderApp();
+  }
   loadNotifications();
   loadMilestones();
   loadCustomFields();
@@ -175,6 +182,7 @@
   window.pmLoadCustomFields = () => loadCustomFields();
   window.pmLoadTemplates = () => loadTemplates();
   window.pmToggleTheme = () => toggleTheme();
+  window.pmToggleDensity = () => toggleDensity();
 
   // ----- actions -----
   async function refreshTasks() {
@@ -265,6 +273,14 @@
     state.filterAssignee = sv.filters?.assignee ?? null;
     state.filterLabels = Array.isArray(sv.filters?.labels) ? sv.filters.labels : [];
     state.search = sv.filters?.search || '';
+    // v2.3: restore per-view layout (grouping/sort/columns/cursor) if the saved
+    // view captured it.
+    const savedUi = sv.filters?.ui;
+    if (savedUi && typeof savedUi === 'object') {
+      for (const k in savedUi) {
+        if (savedUi[k] && typeof savedUi[k] === 'object') state.ui[k] = { ...(state.ui[k] || {}), ...savedUi[k] };
+      }
+    }
     persist();
     renderApp();
   }
@@ -279,6 +295,7 @@
         assignee: state.filterAssignee,
         labels: state.filterLabels,
         search: state.search,
+        ui: JSON.parse(JSON.stringify(state.ui)),
       },
     };
     const r = await API.createSavedView(payload);
@@ -344,6 +361,8 @@
     add(state.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme', state.theme === 'light' ? 'moon' : 'sun', () => toggleTheme(), 'Theme');
     add('Export tasks to CSV', 'download', () => exportTasksCsv(filteredTasks()), 'Export');
     add('Clear filters', 'x', () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }, 'Filter');
+    add(state.density === 'compact' ? 'Comfortable density' : 'Compact density', 'list', () => toggleDensity(), 'Display');
+    add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
     for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
 
     const cmdMatches = q ? cmds.filter(c => c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q)) : cmds.slice(0, 9);
@@ -366,7 +385,7 @@
   // ----- render root -----
   function renderApp() {
     if (window.innerWidth > 980 && state.mobileSidebarOpen) state.mobileSidebarOpen = false;
-    const app = h('div', { class: 'app' });
+    const app = h('div', { class: 'app' + (state.density === 'compact' ? ' density-compact' : '') });
     if (state.mobileSidebarOpen) app.classList.add('mobile-nav-open');
     app.appendChild(renderSidebar());
     app.appendChild(renderMain());
@@ -397,6 +416,7 @@
     if (state.quickAddOpen) rootEl.appendChild(renderQuickAdd());
     if (state.profileOpen) rootEl.appendChild(renderProfile());
     if (state.settingsOpen) rootEl.appendChild(renderSettings());
+    if (state.shortcutsOpen) rootEl.appendChild(renderShortcutsHelp());
   }
 
   // ----- sidebar -----
@@ -1916,6 +1936,45 @@
     return frag;
   }
 
+  // ----- keyboard shortcuts help -----
+  function renderShortcutsHelp() {
+    const frag = document.createDocumentFragment();
+    const scrim = h('div', { class: 'scrim', onClick: close });
+    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', style: { maxWidth: '460px' } });
+    frag.appendChild(scrim);
+    frag.appendChild(modal);
+    function close() { state.shortcutsOpen = false; scrim.remove(); modal.remove(); document.removeEventListener('keydown', onKey); }
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    const mod = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+    const rows = [
+      [`${mod} K`, 'Open the command palette'],
+      [`${mod} N`, 'Create a new task'],
+      ['?', 'Show this help'],
+      ['Esc', 'Close dialogs, popovers & menus'],
+      ['Drag', 'Reorder cards/rows (Kanban, List) · reschedule (Calendar, Timeline)'],
+      ['Click a day', 'Create a task on that date (Calendar)'],
+      ['Enter', 'Open the focused task'],
+    ];
+    modal.appendChild(h('div', { class: 'modal-head' },
+      h('div', { class: 'modal-head-label' }, 'Help'),
+      h('div', { style: { fontSize: '17px', fontWeight: '500' } }, 'Keyboard & shortcuts'),
+    ));
+    const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', gap: '10px', padding: '18px 20px' } });
+    for (const [k, label] of rows) {
+      body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' } },
+        h('span', { style: { fontSize: '13px', color: 'var(--fg-1)' } }, label),
+        h('span', { class: 'kbd', style: { whiteSpace: 'nowrap' } }, k),
+      ));
+    }
+    modal.appendChild(body);
+    modal.appendChild(h('div', { class: 'modal-foot' },
+      h('span', { class: 'hint' }, 'Press ? anytime'),
+      h('button', { class: 'btn btn-primary', onClick: close }, 'Got it'),
+    ));
+    return frag;
+  }
+
   // ----- persistence -----
   function persist() {
     // Wrapped in try/catch because Safari private mode throws a QuotaError
@@ -1956,6 +2015,12 @@
       state.quickAddStatus = 'todo';
       state.quickAddDefaults = null;
       state.quickAddOpen = true;
+      renderApp();
+    }
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (shortcutBlocked()) return;
+      e.preventDefault();
+      state.shortcutsOpen = true;
       renderApp();
     }
   });
