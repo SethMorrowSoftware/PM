@@ -8,7 +8,7 @@ $method = pm_method();
 $taskId = pm_int_param('task_id');
 $id = pm_int_param('id');
 
-if ($method === 'GET' && $id !== null && isset($_GET['download'])) pm_download_attachment($id);
+if ($method === 'GET' && $id !== null && (isset($_GET['download']) || isset($_GET['inline']))) pm_download_attachment($id);
 if ($method === 'GET' && $taskId !== null) pm_list_attachments($taskId);
 if ($method === 'POST' && $taskId !== null) pm_upload_attachment($taskId);
 if ($method === 'DELETE' && $id !== null) pm_delete_attachment($id);
@@ -120,14 +120,18 @@ function pm_download_attachment(int $id): void {
     // (unknown, svg, octet-stream) is forced to octet-stream so the browser
     // can't be tricked into rendering/executing it inline.
     $stored = (string)($row['mime_type'] ?: '');
-    $serveType = pm_attachment_is_serveable_mime($stored) ? $stored : 'application/octet-stream';
+    // Inline display is permitted ONLY for allow-listed RASTER images (never
+    // svg/html/unknown — the uploader already records those as octet-stream).
+    $isImage = pm_attachment_is_serveable_mime($stored) && strpos($stored, 'image/') === 0;
+    $inline = isset($_GET['inline']) && $isImage;
+    $serveType = $inline ? $stored : (pm_attachment_is_serveable_mime($stored) ? $stored : 'application/octet-stream');
 
     while (ob_get_level() > 0) ob_end_clean();
     http_response_code(200);
     header('Content-Type: ' . $serveType);
     header('X-Content-Type-Options: nosniff');
     header('Content-Length: ' . (string)filesize($path));
-    header('Content-Disposition: attachment; filename="' . pm_content_disposition_name((string)$row['original_name']) . '"');
+    header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') . '; filename="' . pm_content_disposition_name((string)$row['original_name']) . '"');
     header('Cache-Control: private, no-store');
     readfile($path);
     exit;
