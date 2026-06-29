@@ -35,5 +35,7 @@ rg -q "renderActivity" assets/js/app.js
 rg -q "openCmd|openCommandPalette" assets/js/app.js
 # v2.4 surface
 rg -q "renderGoals" assets/js/app.js
+# v2.7 surface
+rg -q "window.renderMarkdown" assets/js/ui.js
 
 echo "beta-smoke: OK"

@@ -115,26 +115,55 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
   // section we just updated still shows its data.
   function refreshBoard() { if (window.pmRefreshTasks) window.pmRefreshTasks(); }
 
-  // ---- @mention rendering: wrap "@Full Name" with <span class="mention"> ----
-  // Uses the comment's resolved mention ids -> user names so we only highlight
-  // real mentions (matching the server's exact full-name resolution).
+  // ---- comment body: safe Markdown + @mention highlighting ----
+  // Render the body through renderMarkdown() (escapes everything, then adds a
+  // fixed safe tag set), THEN walk the resulting element's text nodes and wrap
+  // "@Full Name" (only names the server actually resolved as mentions) in
+  // <span class="mention">. We split text nodes — never innerHTML-concatenate
+  // unescaped text — so this stays XSS-safe and markdown formatting survives.
   function renderCommentBody(c) {
-    const wrap = h('span', { style: { fontSize: '13px', color: 'var(--fg-1)', whiteSpace: 'pre-wrap' } });
-    const text = c.body || '';
+    const wrap = renderMarkdown(c.body || '');
     const ids = Array.isArray(c.mentions) ? c.mentions : [];
     const names = ids.map(id => userById(id)?.name).filter(Boolean);
-    if (!names.length) { wrap.appendChild(document.createTextNode(text)); return wrap; }
+    if (!names.length) return wrap;
     // Build a regex that matches "@" + any of the mentioned full names.
     const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp('@(' + names.map(esc).join('|') + ')', 'g');
-    let last = 0, m;
-    while ((m = re.exec(text)) !== null) {
-      if (m.index > last) wrap.appendChild(document.createTextNode(text.slice(last, m.index)));
-      wrap.appendChild(h('span', { class: 'mention' }, '@' + m[1]));
-      last = m.index + m[0].length;
-    }
-    if (last < text.length) wrap.appendChild(document.createTextNode(text.slice(last)));
+    highlightMentions(wrap, re);
     return wrap;
+  }
+
+  // Walk every text node under `root` and replace "@Name" matches with a
+  // .mention span, splicing the span between plain text nodes. Skips inside
+  // <code>/<a> so we don't mangle code spans or rewrite link text.
+  function highlightMentions(root, re) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        for (let p = node.parentNode; p && p !== root; p = p.parentNode) {
+          const tag = p.nodeName;
+          if (tag === 'CODE' || tag === 'A') return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const textNode of targets) {
+      const text = textNode.nodeValue;
+      re.lastIndex = 0;
+      if (!re.test(text)) continue;
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0, m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        frag.appendChild(h('span', { class: 'mention' }, '@' + m[1]));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
   }
 
   function sectionLabel(text, trailing) {
@@ -146,6 +175,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 
   function redraw() {
     drawer.replaceChildren();
+    // Per-project access: tasks in private projects the user can only read carry
+    // can_write === false. Undefined/true means full editing (legacy + open
+    // projects), so default to writable. Server-side checks remain authoritative.
+    const canWrite = task.can_write !== false;
     const proj = projectById(task.project);
     const sub = task.subtasks || [];
     const subDone = sub.filter(s => s.done).length;
@@ -157,6 +190,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     if (proj) head.appendChild(h('span', { style: { display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: proj.color } },
       h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: proj.color } }),
       proj.name));
+    if (!canWrite) head.appendChild(h('span', {
+      class: 'chip', title: 'You have read-only access to this project',
+      style: { fontSize: '10.5px', padding: '1px 7px', color: 'var(--fg-3)', gap: '4px' },
+    }, Icon('eye', 11), 'View only'));
 
     // Watch / Unwatch toggle
     const watchers = Array.isArray(task.watchers) ? task.watchers : [];
@@ -238,7 +275,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             location.hash = '#task=' + newTask.id;
           } catch (e) { toast(e.message, 'error'); }
         } }, Icon('plusCircle', 14)),
-      h('button', { class: 'icon-btn', title: 'Delete',
+      canWrite ? h('button', { class: 'icon-btn', title: 'Delete',
         onClick: async () => {
           const ok = await confirmDialog({ title: `Delete ${task.ref}?`, message: task.title, confirmText: 'Delete', danger: true });
           if (!ok) return;
@@ -248,7 +285,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             delete window._pmAttachmentsCache[task.id];
             onClose();
           } catch (e) { toast(e.message, 'error'); }
-        } }, Icon('trash', 14)),
+        } }, Icon('trash', 14)) : null,
       h('button', { class: 'icon-btn', title: 'Close', onClick: onClose }, Icon('x', 14)),
     ));
     drawer.appendChild(head);
@@ -257,7 +294,11 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     const body = h('div', { class: 'drawer-body' });
 
     // Title
-    if (editingTitle) {
+    if (!canWrite) {
+      body.appendChild(h('h2', {
+        style: { margin: 0, fontSize: '20px', fontWeight: '600', letterSpacing: '-0.01em', padding: '8px', marginLeft: '-8px' },
+      }, task.title));
+    } else if (editingTitle) {
       const ta = h('textarea', {
         value: tempTitle,
         onInput: e => { tempTitle = e.target.value; },
@@ -300,8 +341,8 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Status
     grid.appendChild(PropLabel('activity', 'Status'));
     {
-      const btn = h('button', { style: { background: 'transparent', padding: '4px', borderRadius: '6px' } }, StatusPill(task.status));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { disabled: !canWrite, style: { background: 'transparent', padding: '4px', borderRadius: '6px', cursor: canWrite ? 'pointer' : 'default' } }, StatusPill(task.status));
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => statusPickerContent(task.status, async v => {
           try { const r = await onUpdate(task.id, { status: v }); Object.assign(task, r.task || {status:v}); redraw(); } catch(e){toast(e.message,'error');}
         }, close));
