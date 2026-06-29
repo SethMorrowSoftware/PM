@@ -716,34 +716,36 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       }
       tsec.appendChild(list);
 
-      // Quick log form
-      const minInput = h('input', {
-        type: 'number', min: '1', placeholder: 'min', value: logMinutes,
-        style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { logMinutes = e.target.value; },
-      });
-      const noteInput = h('input', {
-        type: 'text', placeholder: 'Note (optional)', value: logNote,
-        style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { logNote = e.target.value; },
-      });
-      const submitTime = async () => {
-        const mins = parseInt(logMinutes, 10);
-        if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
-        try {
-          await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
-          logMinutes = ''; logNote = '';
-          await loadTime();
-          refreshBoard();
-        } catch (e) { toast(e.message, 'error'); }
-      };
-      minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
-      noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
-      tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
-        Icon('clock', 13),
-        minInput, noteInput,
-        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
-      ));
+      // Quick log form (writers only)
+      if (canWrite) {
+        const minInput = h('input', {
+          type: 'number', min: '1', placeholder: 'min', value: logMinutes,
+          style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { logMinutes = e.target.value; },
+        });
+        const noteInput = h('input', {
+          type: 'text', placeholder: 'Note (optional)', value: logNote,
+          style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { logNote = e.target.value; },
+        });
+        const submitTime = async () => {
+          const mins = parseInt(logMinutes, 10);
+          if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
+          try {
+            await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
+            logMinutes = ''; logNote = '';
+            await loadTime();
+            refreshBoard();
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
+          Icon('clock', 13),
+          minInput, noteInput,
+          h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
+        ));
+      }
       return tsec;
     })());
 
@@ -780,7 +782,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
               ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px', color: 'var(--green-fg)' }, title: 'Sent ' + relTime(rm.sent_at) }, Icon('check', 10), ' Sent')
               : null,
             h('span', { style: { flex: 1 } }),
-            h('button', {
+            canWrite ? h('button', {
               class: 'icon-btn sm', title: 'Delete reminder',
               onClick: async () => {
                 const ok = await confirmDialog({ title: 'Delete reminder?', confirmText: 'Delete', danger: true });
@@ -788,7 +790,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 try { await API.deleteReminder(rm.id); await loadReminders(); }
                 catch (e) { toast(e.message, 'error'); }
               },
-            }, Icon('trash', 11)),
+            }, Icon('trash', 11)) : null,
           ));
         }
       } else if (reminders && !reminders.length) {
@@ -796,36 +798,38 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       }
       rsec.appendChild(list);
 
-      // Add reminder form.
-      const whenInput = h('input', {
-        type: 'datetime-local', value: newReminderAt,
-        style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { newReminderAt = e.target.value; },
-      });
-      const submitReminder = async () => {
-        if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
-        const payload = { remind_at: newReminderAt };
-        if (newReminderEveryone) payload.everyone = '1';
-        try {
-          await API.addReminder(task.id, payload);
-          newReminderAt = ''; newReminderEveryone = false;
-          await loadReminders();
-        } catch (e) { toast(e.message, 'error'); }
-      };
-      whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
+      // Add reminder form (writers only).
+      if (canWrite) {
+        const whenInput = h('input', {
+          type: 'datetime-local', value: newReminderAt,
+          style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { newReminderAt = e.target.value; },
+        });
+        const submitReminder = async () => {
+          if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
+          const payload = { remind_at: newReminderAt };
+          if (newReminderEveryone) payload.everyone = '1';
+          try {
+            await API.addReminder(task.id, payload);
+            newReminderAt = ''; newReminderEveryone = false;
+            await loadReminders();
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
 
-      const everyoneId = 'pm-remind-everyone-' + task.id;
-      const everyoneBox = h('input', {
-        type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
-        onChange: e => { newReminderEveryone = e.target.checked; },
-      });
-      rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
-        Icon('clock', 13),
-        whenInput,
-        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitReminder }, 'Remind me'),
-        h('label', { for: everyoneId, class: 'hstack', style: { gap: '5px', fontSize: '12px', color: 'var(--fg-2)', cursor: 'pointer' } },
-          everyoneBox, 'Remind everyone on this task'),
-      ));
+        const everyoneId = 'pm-remind-everyone-' + task.id;
+        const everyoneBox = h('input', {
+          type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
+          onChange: e => { newReminderEveryone = e.target.checked; },
+        });
+        rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
+          Icon('clock', 13),
+          whenInput,
+          h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitReminder }, 'Remind me'),
+          h('label', { for: everyoneId, class: 'hstack', style: { gap: '5px', fontSize: '12px', color: 'var(--fg-2)', cursor: 'pointer' } },
+            everyoneBox, 'Remind everyone on this task'),
+        ));
+      }
       return rsec;
     })());
 
@@ -839,7 +843,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         const cfGrid = h('div', { style: { display: 'grid', gridTemplateColumns: '110px 1fr', rowGap: '10px', alignItems: 'center' } });
         for (const f of fields) {
           cfGrid.appendChild(PropLabel('settings', f.name));
-          cfGrid.appendChild(h('div', { class: 'cf-field' }, customFieldEditor(f, task)));
+          cfGrid.appendChild(h('div', { class: 'cf-field' }, customFieldEditor(f, task, canWrite)));
         }
         cfSec.appendChild(cfGrid);
         body.appendChild(cfSec);
@@ -857,8 +861,11 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         h('div', { style: { width: pct + '%', height: '100%', background: pct === 100 ? 'var(--green)' : 'var(--acc-0)', transition: 'width 0.3s' } })));
     }
     const subBox = h('div', { style: { background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px' } });
+    if (!sub.length && !canWrite) {
+      subBox.appendChild(h('div', { style: { padding: '9px 12px', color: 'var(--fg-3)', fontSize: '12px' } }, 'No subtasks.'));
+    }
     sub.forEach((s, i) => {
-      const del = h('button', {
+      const del = canWrite ? h('button', {
         class: 'icon-btn sm sub-del',
         title: 'Delete subtask',
         style: { opacity: '0', transition: 'opacity 0.1s' },
@@ -870,22 +877,22 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             redraw();
           } catch(err) { toast(err.message, 'error'); }
         },
-      }, Icon('trash', 12));
+      }, Icon('trash', 12)) : null;
       const row = h('div', {
         style: {
           display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px',
           borderBottom: i === sub.length - 1 ? 'none' : '1px solid var(--line)',
-          cursor: 'pointer',
+          cursor: canWrite ? 'pointer' : 'default',
         },
-        onClick: async () => {
+        onClick: canWrite ? async () => {
           try {
             await onToggleSubtask(task.id, s.id, !s.done);
             s.done = !s.done;
             redraw();
           } catch(e){toast(e.message,'error');}
-        },
-        onMouseenter: e => { e.currentTarget.style.background = 'var(--bg-4)'; del.style.opacity = '1'; },
-        onMouseleave: e => { e.currentTarget.style.background = 'transparent'; del.style.opacity = '0'; },
+        } : null,
+        onMouseenter: canWrite ? e => { e.currentTarget.style.background = 'var(--bg-4)'; if (del) del.style.opacity = '1'; } : null,
+        onMouseleave: canWrite ? e => { e.currentTarget.style.background = 'transparent'; if (del) del.style.opacity = '0'; } : null,
       },
         Checkbox(s.done, 16),
         h('span', { style: { fontSize: '13px', flex: 1,
@@ -895,27 +902,29 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       );
       subBox.appendChild(row);
     });
-    const addRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: sub.length ? '1px solid var(--line)' : 'none' } });
-    addRow.appendChild(h('div', { style: { width: '16px', height: '16px', borderRadius: '4px', border: '1.5px dashed var(--fg-4)' } }));
-    const subInput = h('input', {
-      placeholder: 'Add a subtask...', value: newSubtaskText,
-      style: { flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
-      onInput: e => { newSubtaskText = e.target.value; },
-      onKeydown: async e => {
-        if (e.key === 'Enter' && newSubtaskText.trim()) {
-          try {
-            const text = newSubtaskText.trim();
-            const r = await onAddSubtask(task.id, text);
-            task.subtasks = task.subtasks || [];
-            task.subtasks.push(r.subtask);
-            newSubtaskText = '';
-            redraw();
-          } catch(err){toast(err.message,'error');}
-        }
-      },
-    });
-    addRow.appendChild(subInput);
-    subBox.appendChild(addRow);
+    if (canWrite) {
+      const addRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: sub.length ? '1px solid var(--line)' : 'none' } });
+      addRow.appendChild(h('div', { style: { width: '16px', height: '16px', borderRadius: '4px', border: '1.5px dashed var(--fg-4)' } }));
+      const subInput = h('input', {
+        placeholder: 'Add a subtask...', value: newSubtaskText,
+        style: { flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
+        onInput: e => { newSubtaskText = e.target.value; },
+        onKeydown: async e => {
+          if (e.key === 'Enter' && newSubtaskText.trim()) {
+            try {
+              const text = newSubtaskText.trim();
+              const r = await onAddSubtask(task.id, text);
+              task.subtasks = task.subtasks || [];
+              task.subtasks.push(r.subtask);
+              newSubtaskText = '';
+              redraw();
+            } catch(err){toast(err.message,'error');}
+          }
+        },
+      });
+      addRow.appendChild(subInput);
+      subBox.appendChild(addRow);
+    }
     subSection.appendChild(subBox);
     body.appendChild(subSection);
 
@@ -941,7 +950,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             title: a.name,
           }, a.name),
           h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, formatBytes(a.size)),
-          h('button', {
+          canWrite ? h('button', {
             class: 'btn btn-ghost',
             style: { fontSize: '11px', padding: '2px 6px' },
             onClick: async () => {
@@ -955,7 +964,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 redraw();
               } catch (e) { toast(e.message, 'error'); }
             },
-          }, 'Delete'),
+          }, 'Delete') : null,
         ));
       });
     } else if (attachments && attachments.length === 0) {
@@ -963,38 +972,40 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     }
     attSection.appendChild(attList);
 
-    const fileInput = h('input', {
-      type: 'file',
-      style: { display: 'none' },
-      onChange: async (e) => {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
-        uploadingAttachment = true;
-        redraw();
-        try {
-          const r = await API.uploadAttachment(task.id, file);
-          attachments = attachments || [];
-          attachments.unshift(r.attachment);
-          window._pmAttachmentsCache[task.id] = attachments;
-          task.attachments = (task.attachments || 0) + 1;
-          toast('Attachment uploaded', 'success');
-        } catch (err) {
-          toast('Upload failed: ' + err.message, 'error');
-        } finally {
-          uploadingAttachment = false;
-          e.target.value = '';
+    if (canWrite) {
+      const fileInput = h('input', {
+        type: 'file',
+        style: { display: 'none' },
+        onChange: async (e) => {
+          const file = e.target.files && e.target.files[0];
+          if (!file) return;
+          uploadingAttachment = true;
           redraw();
-        }
-      },
-    });
-    attSection.appendChild(fileInput);
-    attSection.appendChild(h('div', { style: { marginTop: '10px' } },
-      h('button', {
-        class: 'btn btn-ghost',
-        disabled: uploadingAttachment,
-        onClick: () => fileInput.click(),
-      }, Icon('plus', 12), uploadingAttachment ? ' Uploading…' : ' Upload file'),
-    ));
+          try {
+            const r = await API.uploadAttachment(task.id, file);
+            attachments = attachments || [];
+            attachments.unshift(r.attachment);
+            window._pmAttachmentsCache[task.id] = attachments;
+            task.attachments = (task.attachments || 0) + 1;
+            toast('Attachment uploaded', 'success');
+          } catch (err) {
+            toast('Upload failed: ' + err.message, 'error');
+          } finally {
+            uploadingAttachment = false;
+            e.target.value = '';
+            redraw();
+          }
+        },
+      });
+      attSection.appendChild(fileInput);
+      attSection.appendChild(h('div', { style: { marginTop: '10px' } },
+        h('button', {
+          class: 'btn btn-ghost',
+          disabled: uploadingAttachment,
+          onClick: () => fileInput.click(),
+        }, Icon('plus', 12), uploadingAttachment ? ' Uploading…' : ' Upload file'),
+      ));
+    }
     body.appendChild(attSection);
 
     // Comments
@@ -1006,7 +1017,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     const list = h('div', { style: { display: 'grid', gap: '12px' } });
     if (comments) {
       for (const c of comments) {
-        const canModerate = (window.state.me?.is_admin) || (c.user?.id === window.state.me?.id);
+        const canModerate = canWrite && ((window.state.me?.is_admin) || (c.user?.id === window.state.me?.id));
         list.appendChild(h('div', { style: { display: 'flex', gap: '10px' } },
           Avatar(c.user, 28),
           h('div', { style: { flex: 1, minWidth: 0 } },
@@ -1038,15 +1049,17 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
               } }, 'Delete') : null,
             ),
             h('div', { style: { marginTop: '4px' } }, renderCommentBody(c)),
-            // Reactions
-            emojiReactionBar(c.reactions || [], async (emoji) => {
-              const existing = (c.reactions || []).find(r => r.emoji === emoji);
-              try {
-                if (existing && existing.mine) await API.removeReaction(task.id, c.id, emoji);
-                else await API.addReaction(task.id, c.id, emoji);
-                await loadComments();
-              } catch (e) { toast(e.message, 'error'); }
-            }),
+            // Reactions: interactive when writable; read-only display otherwise.
+            canWrite
+              ? emojiReactionBar(c.reactions || [], async (emoji) => {
+                  const existing = (c.reactions || []).find(r => r.emoji === emoji);
+                  try {
+                    if (existing && existing.mine) await API.removeReaction(task.id, c.id, emoji);
+                    else await API.addReaction(task.id, c.id, emoji);
+                    await loadComments();
+                  } catch (e) { toast(e.message, 'error'); }
+                })
+              : readonlyReactionBar(c.reactions || []),
           ),
         ));
       }
@@ -1054,40 +1067,42 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     }
     cmtSection.appendChild(list);
 
-    // New comment box (with @mention autocomplete)
-    const me = window.state.me;
-    const submit = async () => {
-      const v = (newCommentText || '').trim();
-      if (!v) return;
-      try {
-        const r = await API.addComment(task.id, v);
-        comments = comments || [];
-        comments.push(r.comment);
-        cache.comments = comments;
-        newCommentText = '';
-        // A new comment can add watchers / mentions server-side; refresh task +
-        // notifications + the per-task activity timeline.
-        refreshBoard();
-        if (window.pmLoadNotifications) window.pmLoadNotifications();
-        if (window.pmRefreshActivity) window.pmRefreshActivity();
-        loadActivity();
-        redraw();
-      } catch(e){toast(e.message,'error');}
-    };
-    const composer = mentionTextarea({
-      value: newCommentText,
-      placeholder: 'Leave a comment… use @ to mention',
-      onInput: v => { newCommentText = v; },
-      onSubmit: submit,
-    });
-    cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
-      Avatar(me, 28),
-      h('div', { style: { flex: 1, minWidth: 0 } },
-        composer,
-        h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '8px' } },
-          h('button', { class: 'btn btn-primary', style: { padding: '4px 10px', fontSize: '12px' }, onClick: submit }, 'Comment')),
-      ),
-    ));
+    // New comment box (with @mention autocomplete) — writers only.
+    if (canWrite) {
+      const me = window.state.me;
+      const submit = async () => {
+        const v = (newCommentText || '').trim();
+        if (!v) return;
+        try {
+          const r = await API.addComment(task.id, v);
+          comments = comments || [];
+          comments.push(r.comment);
+          cache.comments = comments;
+          newCommentText = '';
+          // A new comment can add watchers / mentions server-side; refresh task +
+          // notifications + the per-task activity timeline.
+          refreshBoard();
+          if (window.pmLoadNotifications) window.pmLoadNotifications();
+          if (window.pmRefreshActivity) window.pmRefreshActivity();
+          loadActivity();
+          redraw();
+        } catch(e){toast(e.message,'error');}
+      };
+      const composer = mentionTextarea({
+        value: newCommentText,
+        placeholder: 'Leave a comment… use @ to mention',
+        onInput: v => { newCommentText = v; },
+        onSubmit: submit,
+      });
+      cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
+        Avatar(me, 28),
+        h('div', { style: { flex: 1, minWidth: 0 } },
+          composer,
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '8px' } },
+            h('button', { class: 'btn btn-primary', style: { padding: '4px 10px', fontSize: '12px' }, onClick: submit }, 'Comment')),
+        ),
+      ));
+    }
     body.appendChild(cmtSection);
 
     // Activity timeline
@@ -1186,11 +1201,12 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 // ---- custom field editor ----
 // Renders an input appropriate to the field_type, seeded from task.custom.
 // Saves via API.setCustomValue then mutates task.custom + refreshes the board.
-function customFieldEditor(field, task) {
+function customFieldEditor(field, task, canWrite = true) {
   const cur = (task.custom && task.custom[field.id] != null) ? task.custom[field.id] : '';
   const baseStyle = { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' };
 
   async function save(value) {
+    if (!canWrite) return;
     const v = value == null ? '' : String(value);
     if (v === String(cur == null ? '' : cur)) return;
     try {
@@ -1204,25 +1220,25 @@ function customFieldEditor(field, task) {
 
   switch (field.field_type) {
     case 'number': {
-      return h('input', { type: 'number', value: cur, style: { ...baseStyle, width: '120px' },
-        onBlur: e => save(e.target.value) });
+      return h('input', { type: 'number', value: cur, disabled: !canWrite, style: { ...baseStyle, width: '120px' },
+        onBlur: canWrite ? e => save(e.target.value) : null });
     }
     case 'date': {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         cur ? parseISO(cur).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })
-            : h('span', { style: { color: 'var(--fg-3)' } }, 'Set date'));
-      btn.addEventListener('click', () => datePickerPopover(btn, cur || '', v => save(v || '')));
+            : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set date' : '—'));
+      if (canWrite) btn.addEventListener('click', () => datePickerPopover(btn, cur || '', v => save(v || '')));
       return btn;
     }
     case 'checkbox': {
       const checked = cur === '1' || cur === 'true' || cur === true;
-      const box = h('div', { style: { cursor: 'pointer', display: 'inline-flex' },
-        onClick: () => save(checked ? '' : '1') }, Checkbox(checked, 18));
+      const box = h('div', { style: { cursor: canWrite ? 'pointer' : 'default', display: 'inline-flex' },
+        onClick: canWrite ? () => save(checked ? '' : '1') : null }, Checkbox(checked, 18));
       return box;
     }
     case 'select': {
       const opts = Array.isArray(field.options) ? field.options : [];
-      const sel = h('select', { style: { ...baseStyle, width: 'auto' }, onChange: e => save(e.target.value) },
+      const sel = h('select', { disabled: !canWrite, style: { ...baseStyle, width: 'auto' }, onChange: canWrite ? e => save(e.target.value) : null },
         h('option', { value: '' }, '—'),
         ...opts.map(o => h('option', { value: o, selected: String(cur) === String(o) }, o)),
       );
@@ -1230,10 +1246,10 @@ function customFieldEditor(field, task) {
     }
     case 'user': {
       const u = userById(cur);
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         u ? h('span', { class: 'hstack', style: { gap: '6px' } }, Avatar(u, 18), u.name)
           : h('span', { style: { color: 'var(--fg-3)' } }, 'Unassigned'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({ close }) => {
           const wrap = h('div');
           wrap.appendChild(h('div', { class: 'popover-header' }, 'Select user'));
@@ -1252,8 +1268,8 @@ function customFieldEditor(field, task) {
       return btn;
     }
     default: { // text
-      return h('input', { type: 'text', value: cur, placeholder: '—', style: { ...baseStyle, width: '100%', maxWidth: '260px' },
-        onBlur: e => save(e.target.value) });
+      return h('input', { type: 'text', value: cur, placeholder: '—', disabled: !canWrite, style: { ...baseStyle, width: '100%', maxWidth: '260px' },
+        onBlur: canWrite ? e => save(e.target.value) : null });
     }
   }
 }
@@ -1277,6 +1293,18 @@ function PropLabel(icon, text) {
   return h('div', {
     style: { display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--fg-3)', fontSize: '12px', fontWeight: '500' }
   }, Icon(icon, 13), text);
+}
+
+// Read-only reaction display for viewers (no add button, no toggling). Mirrors
+// the chip markup of ui.js's emojiReactionBar so it stays visually consistent.
+function readonlyReactionBar(reactions = []) {
+  const row = h('div', { class: 'reaction-bar hstack', style: { gap: '4px', flexWrap: 'wrap', alignItems: 'center' } });
+  for (const r of reactions) {
+    if (!r || !r.count) continue;
+    row.appendChild(h('span', { class: 'reaction' + (r.mine ? ' mine' : ''), style: { cursor: 'default' } },
+      h('span', null, r.emoji), h('span', { class: 'reaction-count' }, String(r.count))));
+  }
+  return row;
 }
 
 function formatBytes(n) {
