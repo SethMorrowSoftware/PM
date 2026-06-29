@@ -38,6 +38,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
   const prevFocus = document.activeElement;
 
   let editingTitle = false;
+  let descEditing = false;
   let tempTitle = task.title;
   let newSubtaskText = '';
   let newCommentText = '';
@@ -115,26 +116,55 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
   // section we just updated still shows its data.
   function refreshBoard() { if (window.pmRefreshTasks) window.pmRefreshTasks(); }
 
-  // ---- @mention rendering: wrap "@Full Name" with <span class="mention"> ----
-  // Uses the comment's resolved mention ids -> user names so we only highlight
-  // real mentions (matching the server's exact full-name resolution).
+  // ---- comment body: safe Markdown + @mention highlighting ----
+  // Render the body through renderMarkdown() (escapes everything, then adds a
+  // fixed safe tag set), THEN walk the resulting element's text nodes and wrap
+  // "@Full Name" (only names the server actually resolved as mentions) in
+  // <span class="mention">. We split text nodes — never innerHTML-concatenate
+  // unescaped text — so this stays XSS-safe and markdown formatting survives.
   function renderCommentBody(c) {
-    const wrap = h('span', { style: { fontSize: '13px', color: 'var(--fg-1)', whiteSpace: 'pre-wrap' } });
-    const text = c.body || '';
+    const wrap = renderMarkdown(c.body || '');
     const ids = Array.isArray(c.mentions) ? c.mentions : [];
     const names = ids.map(id => userById(id)?.name).filter(Boolean);
-    if (!names.length) { wrap.appendChild(document.createTextNode(text)); return wrap; }
+    if (!names.length) return wrap;
     // Build a regex that matches "@" + any of the mentioned full names.
     const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp('@(' + names.map(esc).join('|') + ')', 'g');
-    let last = 0, m;
-    while ((m = re.exec(text)) !== null) {
-      if (m.index > last) wrap.appendChild(document.createTextNode(text.slice(last, m.index)));
-      wrap.appendChild(h('span', { class: 'mention' }, '@' + m[1]));
-      last = m.index + m[0].length;
-    }
-    if (last < text.length) wrap.appendChild(document.createTextNode(text.slice(last)));
+    highlightMentions(wrap, re);
     return wrap;
+  }
+
+  // Walk every text node under `root` and replace "@Name" matches with a
+  // .mention span, splicing the span between plain text nodes. Skips inside
+  // <code>/<a> so we don't mangle code spans or rewrite link text.
+  function highlightMentions(root, re) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        for (let p = node.parentNode; p && p !== root; p = p.parentNode) {
+          const tag = p.nodeName;
+          if (tag === 'CODE' || tag === 'A') return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (const textNode of targets) {
+      const text = textNode.nodeValue;
+      re.lastIndex = 0;
+      if (!re.test(text)) continue;
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0, m;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        frag.appendChild(h('span', { class: 'mention' }, '@' + m[1]));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
   }
 
   function sectionLabel(text, trailing) {
@@ -146,6 +176,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 
   function redraw() {
     drawer.replaceChildren();
+    // Per-project access: tasks in private projects the user can only read carry
+    // can_write === false. Undefined/true means full editing (legacy + open
+    // projects), so default to writable. Server-side checks remain authoritative.
+    const canWrite = task.can_write !== false;
     const proj = projectById(task.project);
     const sub = task.subtasks || [];
     const subDone = sub.filter(s => s.done).length;
@@ -157,6 +191,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     if (proj) head.appendChild(h('span', { style: { display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: proj.color } },
       h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: proj.color } }),
       proj.name));
+    if (!canWrite) head.appendChild(h('span', {
+      class: 'chip', title: 'You have read-only access to this project',
+      style: { fontSize: '10.5px', padding: '1px 7px', color: 'var(--fg-3)', gap: '4px' },
+    }, Icon('eye', 11), 'View only'));
 
     // Watch / Unwatch toggle
     const watchers = Array.isArray(task.watchers) ? task.watchers : [];
@@ -238,7 +276,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             location.hash = '#task=' + newTask.id;
           } catch (e) { toast(e.message, 'error'); }
         } }, Icon('plusCircle', 14)),
-      h('button', { class: 'icon-btn', title: 'Delete',
+      canWrite ? h('button', { class: 'icon-btn', title: 'Delete',
         onClick: async () => {
           const ok = await confirmDialog({ title: `Delete ${task.ref}?`, message: task.title, confirmText: 'Delete', danger: true });
           if (!ok) return;
@@ -248,7 +286,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             delete window._pmAttachmentsCache[task.id];
             onClose();
           } catch (e) { toast(e.message, 'error'); }
-        } }, Icon('trash', 14)),
+        } }, Icon('trash', 14)) : null,
       h('button', { class: 'icon-btn', title: 'Close', onClick: onClose }, Icon('x', 14)),
     ));
     drawer.appendChild(head);
@@ -257,7 +295,11 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     const body = h('div', { class: 'drawer-body' });
 
     // Title
-    if (editingTitle) {
+    if (!canWrite) {
+      body.appendChild(h('h2', {
+        style: { margin: 0, fontSize: '20px', fontWeight: '600', letterSpacing: '-0.01em', padding: '8px', marginLeft: '-8px' },
+      }, task.title));
+    } else if (editingTitle) {
       const ta = h('textarea', {
         value: tempTitle,
         onInput: e => { tempTitle = e.target.value; },
@@ -300,8 +342,8 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Status
     grid.appendChild(PropLabel('activity', 'Status'));
     {
-      const btn = h('button', { style: { background: 'transparent', padding: '4px', borderRadius: '6px' } }, StatusPill(task.status));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { disabled: !canWrite, style: { background: 'transparent', padding: '4px', borderRadius: '6px', cursor: canWrite ? 'pointer' : 'default' } }, StatusPill(task.status));
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => statusPickerContent(task.status, async v => {
           try { const r = await onUpdate(task.id, { status: v }); Object.assign(task, r.task || {status:v}); redraw(); } catch(e){toast(e.message,'error');}
         }, close));
@@ -312,8 +354,8 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Priority
     grid.appendChild(PropLabel('flag', 'Priority'));
     {
-      const btn = h('button', { class: 'chip' }, PriorityFlag(task.priority, true));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: canWrite ? null : { cursor: 'default' } }, PriorityFlag(task.priority, true));
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => priorityPickerContent(task.priority, async v => {
           try { const r = await onUpdate(task.id, { priority: v }); Object.assign(task, r.task || {priority:v}); redraw(); } catch(e){toast(e.message,'error');}
         }, close));
@@ -325,10 +367,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     grid.appendChild(PropLabel('users', 'Assignees'));
     {
       const names = task.assignees.map(id => (userById(id)?.name || '').split(' ')[0]).filter(Boolean).join(', ');
-      const btn = h('button', { class: 'chip', style: { padding: '3px 8px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { padding: '3px 8px', cursor: canWrite ? 'pointer' : 'default' } },
         AvatarStack(task.assignees, 3, 20),
         h('span', { style: { marginLeft: '4px' } }, names || 'Unassigned'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => assigneePickerContent(task.assignees, async uid => {
           const set = new Set(task.assignees);
           set.has(uid) ? set.delete(uid) : set.add(uid);
@@ -342,9 +384,9 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Due
     grid.appendChild(PropLabel('clock', 'Due date'));
     {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
-        task.due ? DueDate(task.due) : h('span', { style: { color: 'var(--fg-3)' } }, 'Set due date'));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
+        task.due ? DueDate(task.due) : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set due date' : 'No due date'));
+      if (canWrite) btn.addEventListener('click', () => {
         datePickerPopover(btn, task.due || '', async v => {
           const val = v || null;
           try { const r = await onUpdate(task.id, { due: val }); Object.assign(task, r.task || {due: val}); redraw(); } catch(err){toast(err.message,'error');}
@@ -356,10 +398,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Start date
     grid.appendChild(PropLabel('calendar', 'Start date'));
     {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         task.start_date ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('calendar', 11), parseISO(task.start_date).toLocaleDateString('en', { month: 'short', day: 'numeric' }))
-                        : h('span', { style: { color: 'var(--fg-3)' } }, 'Set start date'));
-      btn.addEventListener('click', () => {
+                        : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set start date' : 'No start date'));
+      if (canWrite) btn.addEventListener('click', () => {
         datePickerPopover(btn, task.start_date || '', async v => {
           const val = v || null;
           try { const r = await onUpdate(task.id, { start_date: val }); Object.assign(task, r.task || {start_date: val}); refreshBoard(); redraw(); } catch(err){toast(err.message,'error');}
@@ -373,10 +415,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     {
       const projMilestones = (window.state.milestones || []).filter(m => m.project_id == null || m.project_id == task.project);
       const current = (window.state.milestones || []).find(m => m.id == task.milestone_id);
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         current ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('target', 11), current.name)
                 : h('span', { style: { color: 'var(--fg-3)' } }, 'No milestone'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({ close }) => {
           const wrap = h('div');
           wrap.appendChild(h('div', { class: 'popover-header' }, 'Milestone'));
@@ -413,20 +455,24 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     {
       const wrap = h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } });
       task.labels.forEach(l => wrap.appendChild(Tag(l)));
-      const add = h('button', { class: 'chip', style: { fontSize: '11.5px' } }, Icon('plus', 11), ' Add label');
-      add.addEventListener('click', () => {
-        openPopover(add, ({close}) => labelPickerContent(task.labels, async lid => {
-          const set = new Set(task.labels);
-          set.has(lid) ? set.delete(lid) : set.add(lid);
-          const arr = [...set];
-          try { const r = await onUpdate(task.id, { labels: arr }); Object.assign(task, r.task || {labels: arr}); redraw(); } catch(e){toast(e.message,'error');}
-        }, close, {
-          keepOpen: true,
-          scopeProjectId: task.project,
-          onCreateLabel: window.pmCreateLabelFromPicker,
-        }));
-      });
-      wrap.appendChild(add);
+      if (canWrite) {
+        const add = h('button', { class: 'chip', style: { fontSize: '11.5px' } }, Icon('plus', 11), ' Add label');
+        add.addEventListener('click', () => {
+          openPopover(add, ({close}) => labelPickerContent(task.labels, async lid => {
+            const set = new Set(task.labels);
+            set.has(lid) ? set.delete(lid) : set.add(lid);
+            const arr = [...set];
+            try { const r = await onUpdate(task.id, { labels: arr }); Object.assign(task, r.task || {labels: arr}); redraw(); } catch(e){toast(e.message,'error');}
+          }, close, {
+            keepOpen: true,
+            scopeProjectId: task.project,
+            onCreateLabel: window.pmCreateLabelFromPicker,
+          }));
+        });
+        wrap.appendChild(add);
+      } else if (!task.labels.length) {
+        wrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '11.5px' } }, 'No labels'));
+      }
       grid.appendChild(wrap);
     }
 
@@ -434,13 +480,13 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     grid.appendChild(PropLabel('zap', 'Estimate'));
     {
       const input = h('input', {
-        type: 'text', placeholder: '—', value: task.estimate || '',
+        type: 'text', placeholder: '—', value: task.estimate || '', disabled: !canWrite,
         style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none', width: '100px' },
-        onBlur: async e => {
+        onBlur: canWrite ? async e => {
           const v = e.target.value.trim() || null;
           if (v === (task.estimate || null)) return;
           try { const r = await onUpdate(task.id, { estimate: v }); Object.assign(task, r.task || {estimate:v}); } catch(err){toast(err.message,'error');}
-        },
+        } : null,
       });
       grid.appendChild(h('div', null, input));
     }
@@ -461,27 +507,76 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       return wsec;
     })());
 
-    // Description
-    body.appendChild(h('div', { style: { marginTop: '22px' } },
-      h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '8px' } }, 'Description'),
-      (() => {
+    // Description — Markdown-rendered by default; click (or Edit) swaps to the
+    // textarea editor; blur/save persists and swaps back to the rendered view.
+    body.appendChild((() => {
+      const dsec = h('div', { style: { marginTop: '22px' } });
+      const editable = canWrite;
+      // Header with an inline Edit affordance (only while showing rendered text).
+      const header = h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' } },
+        h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600' } }, 'Description'),
+        (editable && !descEditing && (task.description || '').trim())
+          ? h('button', { class: 'btn btn-ghost', style: { fontSize: '11px', padding: '2px 6px' },
+              onClick: () => { descEditing = true; redraw(); } }, Icon('edit', 12), ' Edit')
+          : null,
+      );
+      dsec.appendChild(header);
+
+      if (editable && descEditing) {
         const ta = h('textarea', {
-          placeholder: 'Add a description...',
+          placeholder: 'Add a description… (Markdown supported)',
           value: task.description || '',
           style: {
             width: '100%', minHeight: '70px', resize: 'vertical',
-            background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px',
+            background: 'var(--bg-3)', border: '1px solid var(--acc-border)', borderRadius: '8px',
             padding: '12px', fontSize: '13.5px', color: 'var(--fg-1)', lineHeight: '1.55', outline: 'none',
           },
+          onKeydown: e => { if (e.key === 'Escape') { e.preventDefault(); descEditing = false; redraw(); } },
           onBlur: async e => {
             const v = e.target.value;
-            if (v === (task.description || '')) return;
-            try { const r = await onUpdate(task.id, { description: v }); Object.assign(task, r.task || {description:v}); } catch(err){toast(err.message,'error');}
+            descEditing = false;
+            if (v !== (task.description || '')) {
+              try { const r = await onUpdate(task.id, { description: v }); Object.assign(task, r.task || {description:v}); }
+              catch(err){toast(err.message,'error');}
+            }
+            redraw();
           },
         });
-        return ta;
-      })(),
-    ));
+        dsec.appendChild(ta);
+        // Focus into the editor once it's mounted (after this redraw paints).
+        setTimeout(() => { if (document.body.contains(ta)) { ta.focus(); const n = ta.value.length; try { ta.setSelectionRange(n, n); } catch (_) {} } }, 0);
+      } else if ((task.description || '').trim()) {
+        const md = renderMarkdown(task.description);
+        if (editable) {
+          md.setAttribute('role', 'button');
+          md.setAttribute('tabindex', '0');
+          md.setAttribute('title', 'Click to edit');
+          md.style.cursor = 'text';
+          md.style.padding = '12px';
+          md.style.border = '1px solid var(--line)';
+          md.style.borderRadius = '8px';
+          md.style.background = 'var(--bg-3)';
+          md.addEventListener('click', () => { descEditing = true; redraw(); });
+          md.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); descEditing = true; redraw(); } });
+        }
+        dsec.appendChild(md);
+      } else {
+        // Empty: muted placeholder. Opens the editor when writable.
+        const ph = h('div', {
+          style: { fontSize: '13px', color: 'var(--fg-3)', padding: editable ? '12px' : '0', fontStyle: 'italic',
+            cursor: editable ? 'text' : 'default',
+            border: editable ? '1px dashed var(--line)' : 'none', borderRadius: '8px' },
+        }, editable ? 'Add a description…' : 'No description');
+        if (editable) {
+          ph.setAttribute('role', 'button');
+          ph.setAttribute('tabindex', '0');
+          ph.addEventListener('click', () => { descEditing = true; redraw(); });
+          ph.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); descEditing = true; redraw(); } });
+        }
+        dsec.appendChild(ph);
+      }
+      return dsec;
+    })());
 
     // Dependencies
     body.appendChild((() => {
@@ -494,7 +589,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         const isBlocked = kind === 'blocked_by' && t.status !== 'done';
         const pill = h('span', { class: 'dep-pill' + (isBlocked ? ' blocked' : '') },
           miniTaskChip(t),
-          h('button', {
+          canWrite ? h('button', {
             class: 'icon-btn sm', title: 'Remove dependency', style: { marginLeft: '4px' },
             onClick: async () => {
               // blocked_by: this task depends on t. blocks: t depends on this task.
@@ -506,7 +601,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 refreshBoard();
               } catch (e) { toast(e.message, 'error'); }
             },
-          }, Icon('x', 11)),
+          }, Icon('x', 11)) : null,
         );
         // Make the chip open the task it points to. Navigate via the URL hash
         // so app.js's own hashchange listener opens it (renderApp/state are
@@ -529,7 +624,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 
       // Add blocker
       const addBtn = h('button', { class: 'chip', style: { fontSize: '11.5px', marginBottom: '12px' } }, Icon('gitBranch', 11), ' Add blocker');
-      addBtn.addEventListener('click', () => {
+      if (canWrite) addBtn.addEventListener('click', () => {
         openPopover(addBtn, ({ close }) => {
           const wrap = h('div');
           const input = h('input', { placeholder: 'Search tasks…', value: newBlockerQuery, autofocus: true });
@@ -569,7 +664,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
           return wrap;
         });
       });
-      dsec.appendChild(addBtn);
+      if (canWrite) dsec.appendChild(addBtn);
 
       // Blocks
       dsec.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, 'Blocks'));
@@ -598,7 +693,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       if (timeData && entries.length) {
         const myId = window.state.me?.id;
         for (const en of entries) {
-          const canDelete = window.state.me?.is_admin || (en.user && en.user.id === myId);
+          const canDelete = canWrite && (window.state.me?.is_admin || (en.user && en.user.id === myId));
           list.appendChild(h('div', { class: 'time-entry' },
             en.user ? Avatar(en.user, 20) : h('span', { class: 'avatar', style: { width: '20px', height: '20px' } }, '?'),
             h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, fmtMinutes(en.minutes)),
@@ -621,34 +716,36 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       }
       tsec.appendChild(list);
 
-      // Quick log form
-      const minInput = h('input', {
-        type: 'number', min: '1', placeholder: 'min', value: logMinutes,
-        style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { logMinutes = e.target.value; },
-      });
-      const noteInput = h('input', {
-        type: 'text', placeholder: 'Note (optional)', value: logNote,
-        style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { logNote = e.target.value; },
-      });
-      const submitTime = async () => {
-        const mins = parseInt(logMinutes, 10);
-        if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
-        try {
-          await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
-          logMinutes = ''; logNote = '';
-          await loadTime();
-          refreshBoard();
-        } catch (e) { toast(e.message, 'error'); }
-      };
-      minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
-      noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
-      tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
-        Icon('clock', 13),
-        minInput, noteInput,
-        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
-      ));
+      // Quick log form (writers only)
+      if (canWrite) {
+        const minInput = h('input', {
+          type: 'number', min: '1', placeholder: 'min', value: logMinutes,
+          style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { logMinutes = e.target.value; },
+        });
+        const noteInput = h('input', {
+          type: 'text', placeholder: 'Note (optional)', value: logNote,
+          style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { logNote = e.target.value; },
+        });
+        const submitTime = async () => {
+          const mins = parseInt(logMinutes, 10);
+          if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
+          try {
+            await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
+            logMinutes = ''; logNote = '';
+            await loadTime();
+            refreshBoard();
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
+          Icon('clock', 13),
+          minInput, noteInput,
+          h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
+        ));
+      }
       return tsec;
     })());
 
@@ -685,7 +782,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
               ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px', color: 'var(--green-fg)' }, title: 'Sent ' + relTime(rm.sent_at) }, Icon('check', 10), ' Sent')
               : null,
             h('span', { style: { flex: 1 } }),
-            h('button', {
+            canWrite ? h('button', {
               class: 'icon-btn sm', title: 'Delete reminder',
               onClick: async () => {
                 const ok = await confirmDialog({ title: 'Delete reminder?', confirmText: 'Delete', danger: true });
@@ -693,7 +790,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 try { await API.deleteReminder(rm.id); await loadReminders(); }
                 catch (e) { toast(e.message, 'error'); }
               },
-            }, Icon('trash', 11)),
+            }, Icon('trash', 11)) : null,
           ));
         }
       } else if (reminders && !reminders.length) {
@@ -701,36 +798,38 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       }
       rsec.appendChild(list);
 
-      // Add reminder form.
-      const whenInput = h('input', {
-        type: 'datetime-local', value: newReminderAt,
-        style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onInput: e => { newReminderAt = e.target.value; },
-      });
-      const submitReminder = async () => {
-        if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
-        const payload = { remind_at: newReminderAt };
-        if (newReminderEveryone) payload.everyone = '1';
-        try {
-          await API.addReminder(task.id, payload);
-          newReminderAt = ''; newReminderEveryone = false;
-          await loadReminders();
-        } catch (e) { toast(e.message, 'error'); }
-      };
-      whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
+      // Add reminder form (writers only).
+      if (canWrite) {
+        const whenInput = h('input', {
+          type: 'datetime-local', value: newReminderAt,
+          style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+          onInput: e => { newReminderAt = e.target.value; },
+        });
+        const submitReminder = async () => {
+          if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
+          const payload = { remind_at: newReminderAt };
+          if (newReminderEveryone) payload.everyone = '1';
+          try {
+            await API.addReminder(task.id, payload);
+            newReminderAt = ''; newReminderEveryone = false;
+            await loadReminders();
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
 
-      const everyoneId = 'pm-remind-everyone-' + task.id;
-      const everyoneBox = h('input', {
-        type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
-        onChange: e => { newReminderEveryone = e.target.checked; },
-      });
-      rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
-        Icon('clock', 13),
-        whenInput,
-        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitReminder }, 'Remind me'),
-        h('label', { for: everyoneId, class: 'hstack', style: { gap: '5px', fontSize: '12px', color: 'var(--fg-2)', cursor: 'pointer' } },
-          everyoneBox, 'Remind everyone on this task'),
-      ));
+        const everyoneId = 'pm-remind-everyone-' + task.id;
+        const everyoneBox = h('input', {
+          type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
+          onChange: e => { newReminderEveryone = e.target.checked; },
+        });
+        rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
+          Icon('clock', 13),
+          whenInput,
+          h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitReminder }, 'Remind me'),
+          h('label', { for: everyoneId, class: 'hstack', style: { gap: '5px', fontSize: '12px', color: 'var(--fg-2)', cursor: 'pointer' } },
+            everyoneBox, 'Remind everyone on this task'),
+        ));
+      }
       return rsec;
     })());
 
@@ -744,7 +843,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         const cfGrid = h('div', { style: { display: 'grid', gridTemplateColumns: '110px 1fr', rowGap: '10px', alignItems: 'center' } });
         for (const f of fields) {
           cfGrid.appendChild(PropLabel('settings', f.name));
-          cfGrid.appendChild(h('div', { class: 'cf-field' }, customFieldEditor(f, task)));
+          cfGrid.appendChild(h('div', { class: 'cf-field' }, customFieldEditor(f, task, canWrite)));
         }
         cfSec.appendChild(cfGrid);
         body.appendChild(cfSec);
@@ -762,8 +861,11 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         h('div', { style: { width: pct + '%', height: '100%', background: pct === 100 ? 'var(--green)' : 'var(--acc-0)', transition: 'width 0.3s' } })));
     }
     const subBox = h('div', { style: { background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px' } });
+    if (!sub.length && !canWrite) {
+      subBox.appendChild(h('div', { style: { padding: '9px 12px', color: 'var(--fg-3)', fontSize: '12px' } }, 'No subtasks.'));
+    }
     sub.forEach((s, i) => {
-      const del = h('button', {
+      const del = canWrite ? h('button', {
         class: 'icon-btn sm sub-del',
         title: 'Delete subtask',
         style: { opacity: '0', transition: 'opacity 0.1s' },
@@ -775,22 +877,22 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             redraw();
           } catch(err) { toast(err.message, 'error'); }
         },
-      }, Icon('trash', 12));
+      }, Icon('trash', 12)) : null;
       const row = h('div', {
         style: {
           display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px',
           borderBottom: i === sub.length - 1 ? 'none' : '1px solid var(--line)',
-          cursor: 'pointer',
+          cursor: canWrite ? 'pointer' : 'default',
         },
-        onClick: async () => {
+        onClick: canWrite ? async () => {
           try {
             await onToggleSubtask(task.id, s.id, !s.done);
             s.done = !s.done;
             redraw();
           } catch(e){toast(e.message,'error');}
-        },
-        onMouseenter: e => { e.currentTarget.style.background = 'var(--bg-4)'; del.style.opacity = '1'; },
-        onMouseleave: e => { e.currentTarget.style.background = 'transparent'; del.style.opacity = '0'; },
+        } : null,
+        onMouseenter: canWrite ? e => { e.currentTarget.style.background = 'var(--bg-4)'; if (del) del.style.opacity = '1'; } : null,
+        onMouseleave: canWrite ? e => { e.currentTarget.style.background = 'transparent'; if (del) del.style.opacity = '0'; } : null,
       },
         Checkbox(s.done, 16),
         h('span', { style: { fontSize: '13px', flex: 1,
@@ -800,27 +902,29 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       );
       subBox.appendChild(row);
     });
-    const addRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: sub.length ? '1px solid var(--line)' : 'none' } });
-    addRow.appendChild(h('div', { style: { width: '16px', height: '16px', borderRadius: '4px', border: '1.5px dashed var(--fg-4)' } }));
-    const subInput = h('input', {
-      placeholder: 'Add a subtask...', value: newSubtaskText,
-      style: { flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
-      onInput: e => { newSubtaskText = e.target.value; },
-      onKeydown: async e => {
-        if (e.key === 'Enter' && newSubtaskText.trim()) {
-          try {
-            const text = newSubtaskText.trim();
-            const r = await onAddSubtask(task.id, text);
-            task.subtasks = task.subtasks || [];
-            task.subtasks.push(r.subtask);
-            newSubtaskText = '';
-            redraw();
-          } catch(err){toast(err.message,'error');}
-        }
-      },
-    });
-    addRow.appendChild(subInput);
-    subBox.appendChild(addRow);
+    if (canWrite) {
+      const addRow = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: sub.length ? '1px solid var(--line)' : 'none' } });
+      addRow.appendChild(h('div', { style: { width: '16px', height: '16px', borderRadius: '4px', border: '1.5px dashed var(--fg-4)' } }));
+      const subInput = h('input', {
+        placeholder: 'Add a subtask...', value: newSubtaskText,
+        style: { flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
+        onInput: e => { newSubtaskText = e.target.value; },
+        onKeydown: async e => {
+          if (e.key === 'Enter' && newSubtaskText.trim()) {
+            try {
+              const text = newSubtaskText.trim();
+              const r = await onAddSubtask(task.id, text);
+              task.subtasks = task.subtasks || [];
+              task.subtasks.push(r.subtask);
+              newSubtaskText = '';
+              redraw();
+            } catch(err){toast(err.message,'error');}
+          }
+        },
+      });
+      addRow.appendChild(subInput);
+      subBox.appendChild(addRow);
+    }
     subSection.appendChild(subBox);
     body.appendChild(subSection);
 
@@ -846,7 +950,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             title: a.name,
           }, a.name),
           h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, formatBytes(a.size)),
-          h('button', {
+          canWrite ? h('button', {
             class: 'btn btn-ghost',
             style: { fontSize: '11px', padding: '2px 6px' },
             onClick: async () => {
@@ -860,7 +964,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 redraw();
               } catch (e) { toast(e.message, 'error'); }
             },
-          }, 'Delete'),
+          }, 'Delete') : null,
         ));
       });
     } else if (attachments && attachments.length === 0) {
@@ -868,38 +972,40 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     }
     attSection.appendChild(attList);
 
-    const fileInput = h('input', {
-      type: 'file',
-      style: { display: 'none' },
-      onChange: async (e) => {
-        const file = e.target.files && e.target.files[0];
-        if (!file) return;
-        uploadingAttachment = true;
-        redraw();
-        try {
-          const r = await API.uploadAttachment(task.id, file);
-          attachments = attachments || [];
-          attachments.unshift(r.attachment);
-          window._pmAttachmentsCache[task.id] = attachments;
-          task.attachments = (task.attachments || 0) + 1;
-          toast('Attachment uploaded', 'success');
-        } catch (err) {
-          toast('Upload failed: ' + err.message, 'error');
-        } finally {
-          uploadingAttachment = false;
-          e.target.value = '';
+    if (canWrite) {
+      const fileInput = h('input', {
+        type: 'file',
+        style: { display: 'none' },
+        onChange: async (e) => {
+          const file = e.target.files && e.target.files[0];
+          if (!file) return;
+          uploadingAttachment = true;
           redraw();
-        }
-      },
-    });
-    attSection.appendChild(fileInput);
-    attSection.appendChild(h('div', { style: { marginTop: '10px' } },
-      h('button', {
-        class: 'btn btn-ghost',
-        disabled: uploadingAttachment,
-        onClick: () => fileInput.click(),
-      }, Icon('plus', 12), uploadingAttachment ? ' Uploading…' : ' Upload file'),
-    ));
+          try {
+            const r = await API.uploadAttachment(task.id, file);
+            attachments = attachments || [];
+            attachments.unshift(r.attachment);
+            window._pmAttachmentsCache[task.id] = attachments;
+            task.attachments = (task.attachments || 0) + 1;
+            toast('Attachment uploaded', 'success');
+          } catch (err) {
+            toast('Upload failed: ' + err.message, 'error');
+          } finally {
+            uploadingAttachment = false;
+            e.target.value = '';
+            redraw();
+          }
+        },
+      });
+      attSection.appendChild(fileInput);
+      attSection.appendChild(h('div', { style: { marginTop: '10px' } },
+        h('button', {
+          class: 'btn btn-ghost',
+          disabled: uploadingAttachment,
+          onClick: () => fileInput.click(),
+        }, Icon('plus', 12), uploadingAttachment ? ' Uploading…' : ' Upload file'),
+      ));
+    }
     body.appendChild(attSection);
 
     // Comments
@@ -911,7 +1017,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     const list = h('div', { style: { display: 'grid', gap: '12px' } });
     if (comments) {
       for (const c of comments) {
-        const canModerate = (window.state.me?.is_admin) || (c.user?.id === window.state.me?.id);
+        const canModerate = canWrite && ((window.state.me?.is_admin) || (c.user?.id === window.state.me?.id));
         list.appendChild(h('div', { style: { display: 'flex', gap: '10px' } },
           Avatar(c.user, 28),
           h('div', { style: { flex: 1, minWidth: 0 } },
@@ -943,15 +1049,17 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
               } }, 'Delete') : null,
             ),
             h('div', { style: { marginTop: '4px' } }, renderCommentBody(c)),
-            // Reactions
-            emojiReactionBar(c.reactions || [], async (emoji) => {
-              const existing = (c.reactions || []).find(r => r.emoji === emoji);
-              try {
-                if (existing && existing.mine) await API.removeReaction(task.id, c.id, emoji);
-                else await API.addReaction(task.id, c.id, emoji);
-                await loadComments();
-              } catch (e) { toast(e.message, 'error'); }
-            }),
+            // Reactions: interactive when writable; read-only display otherwise.
+            canWrite
+              ? emojiReactionBar(c.reactions || [], async (emoji) => {
+                  const existing = (c.reactions || []).find(r => r.emoji === emoji);
+                  try {
+                    if (existing && existing.mine) await API.removeReaction(task.id, c.id, emoji);
+                    else await API.addReaction(task.id, c.id, emoji);
+                    await loadComments();
+                  } catch (e) { toast(e.message, 'error'); }
+                })
+              : readonlyReactionBar(c.reactions || []),
           ),
         ));
       }
@@ -959,40 +1067,42 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     }
     cmtSection.appendChild(list);
 
-    // New comment box (with @mention autocomplete)
-    const me = window.state.me;
-    const submit = async () => {
-      const v = (newCommentText || '').trim();
-      if (!v) return;
-      try {
-        const r = await API.addComment(task.id, v);
-        comments = comments || [];
-        comments.push(r.comment);
-        cache.comments = comments;
-        newCommentText = '';
-        // A new comment can add watchers / mentions server-side; refresh task +
-        // notifications + the per-task activity timeline.
-        refreshBoard();
-        if (window.pmLoadNotifications) window.pmLoadNotifications();
-        if (window.pmRefreshActivity) window.pmRefreshActivity();
-        loadActivity();
-        redraw();
-      } catch(e){toast(e.message,'error');}
-    };
-    const composer = mentionTextarea({
-      value: newCommentText,
-      placeholder: 'Leave a comment… use @ to mention',
-      onInput: v => { newCommentText = v; },
-      onSubmit: submit,
-    });
-    cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
-      Avatar(me, 28),
-      h('div', { style: { flex: 1, minWidth: 0 } },
-        composer,
-        h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '8px' } },
-          h('button', { class: 'btn btn-primary', style: { padding: '4px 10px', fontSize: '12px' }, onClick: submit }, 'Comment')),
-      ),
-    ));
+    // New comment box (with @mention autocomplete) — writers only.
+    if (canWrite) {
+      const me = window.state.me;
+      const submit = async () => {
+        const v = (newCommentText || '').trim();
+        if (!v) return;
+        try {
+          const r = await API.addComment(task.id, v);
+          comments = comments || [];
+          comments.push(r.comment);
+          cache.comments = comments;
+          newCommentText = '';
+          // A new comment can add watchers / mentions server-side; refresh task +
+          // notifications + the per-task activity timeline.
+          refreshBoard();
+          if (window.pmLoadNotifications) window.pmLoadNotifications();
+          if (window.pmRefreshActivity) window.pmRefreshActivity();
+          loadActivity();
+          redraw();
+        } catch(e){toast(e.message,'error');}
+      };
+      const composer = mentionTextarea({
+        value: newCommentText,
+        placeholder: 'Leave a comment… use @ to mention',
+        onInput: v => { newCommentText = v; },
+        onSubmit: submit,
+      });
+      cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
+        Avatar(me, 28),
+        h('div', { style: { flex: 1, minWidth: 0 } },
+          composer,
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '8px' } },
+            h('button', { class: 'btn btn-primary', style: { padding: '4px 10px', fontSize: '12px' }, onClick: submit }, 'Comment')),
+        ),
+      ));
+    }
     body.appendChild(cmtSection);
 
     // Activity timeline
@@ -1091,11 +1201,12 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 // ---- custom field editor ----
 // Renders an input appropriate to the field_type, seeded from task.custom.
 // Saves via API.setCustomValue then mutates task.custom + refreshes the board.
-function customFieldEditor(field, task) {
+function customFieldEditor(field, task, canWrite = true) {
   const cur = (task.custom && task.custom[field.id] != null) ? task.custom[field.id] : '';
   const baseStyle = { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' };
 
   async function save(value) {
+    if (!canWrite) return;
     const v = value == null ? '' : String(value);
     if (v === String(cur == null ? '' : cur)) return;
     try {
@@ -1109,25 +1220,25 @@ function customFieldEditor(field, task) {
 
   switch (field.field_type) {
     case 'number': {
-      return h('input', { type: 'number', value: cur, style: { ...baseStyle, width: '120px' },
-        onBlur: e => save(e.target.value) });
+      return h('input', { type: 'number', value: cur, disabled: !canWrite, style: { ...baseStyle, width: '120px' },
+        onBlur: canWrite ? e => save(e.target.value) : null });
     }
     case 'date': {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         cur ? parseISO(cur).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })
-            : h('span', { style: { color: 'var(--fg-3)' } }, 'Set date'));
-      btn.addEventListener('click', () => datePickerPopover(btn, cur || '', v => save(v || '')));
+            : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set date' : '—'));
+      if (canWrite) btn.addEventListener('click', () => datePickerPopover(btn, cur || '', v => save(v || '')));
       return btn;
     }
     case 'checkbox': {
       const checked = cur === '1' || cur === 'true' || cur === true;
-      const box = h('div', { style: { cursor: 'pointer', display: 'inline-flex' },
-        onClick: () => save(checked ? '' : '1') }, Checkbox(checked, 18));
+      const box = h('div', { style: { cursor: canWrite ? 'pointer' : 'default', display: 'inline-flex' },
+        onClick: canWrite ? () => save(checked ? '' : '1') : null }, Checkbox(checked, 18));
       return box;
     }
     case 'select': {
       const opts = Array.isArray(field.options) ? field.options : [];
-      const sel = h('select', { style: { ...baseStyle, width: 'auto' }, onChange: e => save(e.target.value) },
+      const sel = h('select', { disabled: !canWrite, style: { ...baseStyle, width: 'auto' }, onChange: canWrite ? e => save(e.target.value) : null },
         h('option', { value: '' }, '—'),
         ...opts.map(o => h('option', { value: o, selected: String(cur) === String(o) }, o)),
       );
@@ -1135,10 +1246,10 @@ function customFieldEditor(field, task) {
     }
     case 'user': {
       const u = userById(cur);
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         u ? h('span', { class: 'hstack', style: { gap: '6px' } }, Avatar(u, 18), u.name)
           : h('span', { style: { color: 'var(--fg-3)' } }, 'Unassigned'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({ close }) => {
           const wrap = h('div');
           wrap.appendChild(h('div', { class: 'popover-header' }, 'Select user'));
@@ -1157,8 +1268,8 @@ function customFieldEditor(field, task) {
       return btn;
     }
     default: { // text
-      return h('input', { type: 'text', value: cur, placeholder: '—', style: { ...baseStyle, width: '100%', maxWidth: '260px' },
-        onBlur: e => save(e.target.value) });
+      return h('input', { type: 'text', value: cur, placeholder: '—', disabled: !canWrite, style: { ...baseStyle, width: '100%', maxWidth: '260px' },
+        onBlur: canWrite ? e => save(e.target.value) : null });
     }
   }
 }
@@ -1182,6 +1293,18 @@ function PropLabel(icon, text) {
   return h('div', {
     style: { display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--fg-3)', fontSize: '12px', fontWeight: '500' }
   }, Icon(icon, 13), text);
+}
+
+// Read-only reaction display for viewers (no add button, no toggling). Mirrors
+// the chip markup of ui.js's emojiReactionBar so it stays visually consistent.
+function readonlyReactionBar(reactions = []) {
+  const row = h('div', { class: 'reaction-bar hstack', style: { gap: '4px', flexWrap: 'wrap', alignItems: 'center' } });
+  for (const r of reactions) {
+    if (!r || !r.count) continue;
+    row.appendChild(h('span', { class: 'reaction' + (r.mine ? ' mine' : ''), style: { cursor: 'default' } },
+      h('span', null, r.emoji), h('span', { class: 'reaction-count' }, String(r.count))));
+  }
+  return row;
 }
 
 function formatBytes(n) {

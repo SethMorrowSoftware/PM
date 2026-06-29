@@ -1,7 +1,8 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$viewerUid = pm_require_auth();
 
 // Pagination (defaults preserve the original "last 40" behavior for the
 // dashboard feed, which calls this with no params).
@@ -20,6 +21,20 @@ if ($q !== '') {
     $where[] = '(a.detail LIKE ? OR t.title LIKE ? OR t.ref LIKE ?)';
     $like = '%' . $q . '%';
     array_push($params, $like, $like, $like);
+}
+// Hide activity rows whose task is in a private project the viewer can't read.
+// null = no restriction (admin / no private projects) → keep it cheap.
+if (function_exists('pm_readable_project_ids')) {
+    $readable = pm_readable_project_ids($viewerUid);
+    if ($readable !== null) {
+        if ($readable) {
+            $ph = implode(',', array_fill(0, count($readable), '?'));
+            $where[] = "(a.task_id IS NULL OR t.project_id IN ($ph))";
+            foreach ($readable as $rid) $params[] = $rid;
+        } else {
+            $where[] = 'a.task_id IS NULL';
+        }
+    }
 }
 $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
 

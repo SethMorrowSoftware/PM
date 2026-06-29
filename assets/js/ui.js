@@ -887,3 +887,55 @@ window.sortableList = sortableList;
 window.emojiReactionBar = emojiReactionBar;
 window.ThemeToggle = ThemeToggle;
 window.miniTaskChip = miniTaskChip;
+
+// -------- Minimal, SAFE Markdown renderer --------
+// Security model: ALL input HTML is escaped FIRST, then a fixed, small set of
+// formatting tags is introduced (strong/em/code/a/p/ul/li/br). Links are only
+// emitted for http(s)/mailto. No raw user HTML can survive, so this is XSS-safe
+// even though the formatting itself is intentionally simple.
+function renderMarkdown(text) {
+  const div = document.createElement('div');
+  div.className = 'md';
+  const src = (text == null ? '' : String(text));
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  // Inline formatting. Code spans are isolated by splitting so their contents
+  // are never touched by the other transforms (no fragile placeholders).
+  const inline = (s) => s.split(/(`[^`]+`)/g).map(part => {
+    if (part.length >= 2 && part.charAt(0) === '`' && part.charAt(part.length - 1) === '`') {
+      return '<code>' + part.slice(1, -1) + '</code>';
+    }
+    let x = part;
+    x = x.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+      /^(https?:\/\/|mailto:)/i.test(u.replace(/&amp;/g, '&'))
+        ? '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + '</a>' : m);
+    x = x.replace(/(^|[\s(])((?:https?:\/\/)[^\s<]+)/g, (m, pre, url) =>
+      pre + '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url.replace(/&amp;/g, '&') + '</a>');
+    x = x.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    x = x.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>')
+         .replace(/(^|[^_\w])_([^_\s][^_]*?)_/g, '$1<em>$2</em>');
+    return x;
+  }).join('');
+
+  const lines = esc(src).split(/\r?\n/);
+  let html = '', inList = false, para = [];
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  const flushPara = () => { if (para.length) { html += '<p>' + inline(para.join('<br>')) + '</p>'; para = []; } };
+  for (const line of lines) {
+    if (/^\s*[-*]\s+/.test(line)) {
+      flushPara();
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += '<li>' + inline(line.replace(/^\s*[-*]\s+/, '')) + '</li>';
+    } else if (line.trim() === '') {
+      flushPara(); closeList();
+    } else {
+      closeList(); para.push(line);
+    }
+  }
+  flushPara(); closeList();
+  div.innerHTML = html;
+  return div;
+}
+
+window.renderMarkdown = renderMarkdown;
