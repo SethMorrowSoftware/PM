@@ -213,6 +213,31 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       h('button', { class: 'icon-btn', title: 'Copy link',
         onClick: () => { navigator.clipboard?.writeText(`${location.origin}${location.pathname}#task=${task.id}`); toast('Link copied'); } },
         Icon('link', 14)),
+      h('button', { class: 'icon-btn', title: 'Duplicate task',
+        onClick: async () => {
+          try {
+            const r = await API.createTask({
+              title: task.title + ' (copy)',
+              project: task.project,
+              status: task.status,
+              priority: task.priority,
+              description: task.description || '',
+              estimate: task.estimate || '',
+              due: task.due || null,
+              start_date: task.start_date || null,
+              milestone_id: task.milestone_id || null,
+              assignees: (task.assignees || []).slice(),
+              labels: (task.labels || []).slice(),
+            });
+            const newTask = r.task || r;
+            for (const s of (task.subtasks || [])) {
+              try { await API.addSubtask(newTask.id, s.text); } catch (_) {}
+            }
+            if (window.pmRefreshTasks) window.pmRefreshTasks();
+            toast('Task duplicated', 'success');
+            location.hash = '#task=' + newTask.id;
+          } catch (e) { toast(e.message, 'error'); }
+        } }, Icon('plusCircle', 14)),
       h('button', { class: 'icon-btn', title: 'Delete',
         onClick: async () => {
           const ok = await confirmDialog({ title: `Delete ${task.ref}?`, message: task.title, confirmText: 'Delete', danger: true });

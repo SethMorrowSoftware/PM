@@ -124,6 +124,7 @@ function pm_install_schema(): void {
             sort_order INT NOT NULL DEFAULT 0,
             archived TINYINT(1) NOT NULL DEFAULT 0,
             archived_at TIMESTAMP NULL,
+            visibility VARCHAR(8) NOT NULL DEFAULT 'open',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
@@ -433,6 +434,43 @@ function pm_install_schema(): void {
             INDEX idx_ar_project (project_id),
             CONSTRAINT fk_ar_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2.4: goals / OKRs -------------------------------------------
+        "CREATE TABLE IF NOT EXISTS goals (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(160) NOT NULL,
+            description TEXT NULL,
+            due DATE NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'on_track',
+            progress_mode VARCHAR(8) NOT NULL DEFAULT 'auto',
+            manual_pct TINYINT NULL,
+            owner_id INT NULL,
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_goal_owner (owner_id),
+            CONSTRAINT fk_goal_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS goal_projects (
+            goal_id INT NOT NULL,
+            project_id INT NOT NULL,
+            PRIMARY KEY (goal_id, project_id),
+            INDEX idx_gp_project (project_id),
+            CONSTRAINT fk_gp_goal    FOREIGN KEY (goal_id)    REFERENCES goals(id)    ON DELETE CASCADE,
+            CONSTRAINT fk_gp_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2.6: per-project membership & roles -------------------------
+        "CREATE TABLE IF NOT EXISTS project_members (
+            project_id INT NOT NULL,
+            user_id INT NOT NULL,
+            role VARCHAR(12) NOT NULL DEFAULT 'editor',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, user_id),
+            INDEX idx_pmemb_user (user_id),
+            CONSTRAINT fk_pmemb_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            CONSTRAINT fk_pmemb_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     foreach ($sql as $q) $pdo->exec($q);
 
@@ -473,6 +511,7 @@ function pm_install_schema(): void {
     pm_migrate_add_column_if_missing('tasks', 'start_date',   'DATE NULL');
     pm_migrate_add_column_if_missing('tasks', 'position',     'DOUBLE NOT NULL DEFAULT 0');
     pm_migrate_add_column_if_missing('tasks', 'milestone_id', 'INT NULL');
+    pm_migrate_add_column_if_missing('projects', 'visibility', "VARCHAR(8) NOT NULL DEFAULT 'open'");
     pm_migrate_add_index_if_missing('tasks', 'idx_task_position', '(project_id, status, position)');
     pm_migrate_add_index_if_missing('tasks', 'idx_task_start',    '(start_date)');
     pm_migrate_add_index_if_missing('tasks', 'idx_task_milestone','(milestone_id)');

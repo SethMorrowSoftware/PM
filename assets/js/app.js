@@ -41,14 +41,17 @@
     settingsOpen: false,
     mobileSidebarOpen: false,
     notifOpen: false,
+    shortcutsOpen: false,
     // v2 collections
     notifications: [],
     unread: 0,
     milestones: [],
     customFields: [],
     templates: [],
+    goals: [],
     // theme: explicit user choice ('dark'|'light'); null = follow OS
     theme: localStorage.getItem('pm_theme') || 'dark',
+    density: localStorage.getItem('pm_density') === 'compact' ? 'compact' : 'comfortable',
     // view-local UI state, LIFTED here so it survives full re-renders
     ui: {
       list:      { groupBy: 'status', sortBy: 'priority', sortDir: 'asc', collapsed: {}, selected: [] },
@@ -154,16 +157,26 @@
     return API.listTemplates().then(r => { state.templates = r.templates || []; renderApp(); })
       .catch(e => console.warn('Templates load failed:', e));
   }
+  function loadGoals() {
+    return API.listGoals().then(r => { state.goals = r.goals || []; renderApp(); })
+      .catch(e => console.warn('Goals load failed:', e));
+  }
   function toggleTheme() {
     state.theme = state.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = state.theme;
     try { localStorage.setItem('pm_theme', state.theme); } catch { /* ignore */ }
     renderApp();
   }
+  function toggleDensity() {
+    state.density = state.density === 'compact' ? 'comfortable' : 'compact';
+    try { localStorage.setItem('pm_density', state.density); } catch { /* ignore */ }
+    renderApp();
+  }
   loadNotifications();
   loadMilestones();
   loadCustomFields();
   loadTemplates();
+  loadGoals();
   // Light polling keeps the notification bell fresh without SSE/websockets,
   // which are impractical on shared cPanel hosting.
   setInterval(loadNotifications, 60000);
@@ -174,7 +187,9 @@
   window.pmLoadMilestones = () => loadMilestones();
   window.pmLoadCustomFields = () => loadCustomFields();
   window.pmLoadTemplates = () => loadTemplates();
+  window.pmLoadGoals = () => loadGoals();
   window.pmToggleTheme = () => toggleTheme();
+  window.pmToggleDensity = () => toggleDensity();
 
   // ----- actions -----
   async function refreshTasks() {
@@ -265,6 +280,14 @@
     state.filterAssignee = sv.filters?.assignee ?? null;
     state.filterLabels = Array.isArray(sv.filters?.labels) ? sv.filters.labels : [];
     state.search = sv.filters?.search || '';
+    // v2.3: restore per-view layout (grouping/sort/columns/cursor) if the saved
+    // view captured it.
+    const savedUi = sv.filters?.ui;
+    if (savedUi && typeof savedUi === 'object') {
+      for (const k in savedUi) {
+        if (savedUi[k] && typeof savedUi[k] === 'object') state.ui[k] = { ...(state.ui[k] || {}), ...savedUi[k] };
+      }
+    }
     persist();
     renderApp();
   }
@@ -279,6 +302,7 @@
         assignee: state.filterAssignee,
         labels: state.filterLabels,
         search: state.search,
+        ui: JSON.parse(JSON.stringify(state.ui)),
       },
     };
     const r = await API.createSavedView(payload);
@@ -337,13 +361,17 @@
       ['list', 'List', 'list'], ['checklist', 'My tasks', 'checkSquare'],
       ['calendar', 'Calendar', 'calendar'], ['timeline', 'Timeline', 'gantt'],
       ['workload', 'Workload', 'users'], ['activity', 'Activity', 'activity'],
+      ['goals', 'Goals', 'target'],
     ];
     for (const [k, l, ic] of views) add(`Go to ${l}`, ic, () => { state.view = k; persist(); renderApp(); }, 'View');
     add('New task', 'plus', () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); }, 'Create');
     add('Settings', 'settings', () => { state.settingsOpen = true; renderApp(); }, 'Admin');
     add(state.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme', state.theme === 'light' ? 'moon' : 'sun', () => toggleTheme(), 'Theme');
     add('Export tasks to CSV', 'download', () => exportTasksCsv(filteredTasks()), 'Export');
+    add('Import tasks from CSV', 'upload', () => { if (typeof openImport === 'function') openImport(); }, 'Import');
     add('Clear filters', 'x', () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }, 'Filter');
+    add(state.density === 'compact' ? 'Comfortable density' : 'Compact density', 'list', () => toggleDensity(), 'Display');
+    add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
     for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
 
     const cmdMatches = q ? cmds.filter(c => c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q)) : cmds.slice(0, 9);
@@ -366,7 +394,7 @@
   // ----- render root -----
   function renderApp() {
     if (window.innerWidth > 980 && state.mobileSidebarOpen) state.mobileSidebarOpen = false;
-    const app = h('div', { class: 'app' });
+    const app = h('div', { class: 'app' + (state.density === 'compact' ? ' density-compact' : '') });
     if (state.mobileSidebarOpen) app.classList.add('mobile-nav-open');
     app.appendChild(renderSidebar());
     app.appendChild(renderMain());
@@ -397,6 +425,11 @@
     if (state.quickAddOpen) rootEl.appendChild(renderQuickAdd());
     if (state.profileOpen) rootEl.appendChild(renderProfile());
     if (state.settingsOpen) rootEl.appendChild(renderSettings());
+    if (state.shortcutsOpen) rootEl.appendChild(renderShortcutsHelp());
+    // App-like bottom nav on phones — hidden while any overlay/drawer is open.
+    if (!state.openTaskId && !state.quickAddOpen && !state.settingsOpen && !state.profileOpen && !state.shortcutsOpen && !state.mobileSidebarOpen) {
+      rootEl.appendChild(renderMobileNav());
+    }
   }
 
   // ----- sidebar -----
@@ -524,6 +557,22 @@
     }[name] || '#64748B';
   }
 
+  // ----- mobile bottom nav (phones; CSS hides it on desktop) -----
+  function renderMobileNav() {
+    const item = (icon, label, active, onClick, extra) => h('button', {
+      class: 'mbn-item' + (active ? ' active' : '') + (extra ? ' ' + extra : ''),
+      'aria-current': active ? 'page' : null,
+      onClick,
+    }, Icon(icon, 19), h('span', null, label));
+    return h('nav', { class: 'mobile-bottom-nav', 'aria-label': 'Primary' },
+      item('home', 'Home', state.view === 'dashboard', () => { state.view = 'dashboard'; persist(); renderApp(); }),
+      item('checkSquare', 'My Tasks', state.view === 'checklist', () => { state.view = 'checklist'; persist(); renderApp(); }),
+      item('kanban', 'Board', state.view === 'kanban', () => { state.view = 'kanban'; persist(); renderApp(); }),
+      item('plus', 'New', false, () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); }, 'mbn-new'),
+      item('list', 'Menu', false, () => { state.mobileSidebarOpen = true; renderApp(); }),
+    );
+  }
+
   // ----- main area -----
   function renderMain() {
     const main = h('main', { class: 'main' });
@@ -569,6 +618,7 @@
       case 'timeline':  content.appendChild(renderTimeline(tasks, handlers)); break;
       case 'workload':  content.appendChild(renderWorkload(tasks, handlers)); break;
       case 'activity':  content.appendChild(renderActivity(state.tasks, handlers)); break;
+      case 'goals':     content.appendChild(renderGoals(state.tasks, handlers)); break;
       default: content.appendChild(h('div', { class: 'empty' }, 'Unknown view'));
     }
     return main;
@@ -621,7 +671,7 @@
       onClick: () => { state.mobileSidebarOpen = !state.mobileSidebarOpen; renderApp(); },
     }, Icon('list', 16)));
     const proj = state.filterProject ? projectById(state.filterProject) : null;
-    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity' };
+    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity', goals: 'Goals' };
     bar.appendChild(h('div', { class: 'crumbs' },
       h('span', null, 'Workspace'),
       Icon('chevronRight', 12, 1.75, 'sep'),
@@ -694,6 +744,7 @@
       ['timeline',  'Timeline',  'gantt'],
       ['workload',  'Workload',  'users'],
       ['activity',  'Activity',  'activity'],
+      ['goals',     'Goals',     'target'],
     ];
     const tabs = h('div', { class: 'view-tabs' });
     for (const [k, l, ic] of viewDef) {
@@ -786,9 +837,13 @@
       });
       bar.appendChild(svBtn);
 
-      // Count
+      // Count + import/export
       const n = filteredTasks().length;
       bar.appendChild(h('div', { style: { marginLeft: 'auto' }, class: 'hstack' },
+        h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Import tasks from CSV',
+          onClick: () => { if (typeof openImport === 'function') openImport(); else toast('Import unavailable', 'error'); } }, Icon('upload', 12), ' Import'),
+        h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Export these tasks to CSV',
+          onClick: () => exportTasksCsv(filteredTasks()) }, Icon('download', 12), ' Export'),
         h('span', { style: { fontSize: '11.5px', color: 'var(--fg-3)' } }, `${n} task${n !== 1 ? 's' : ''}`),
       ));
     }
@@ -1916,6 +1971,45 @@
     return frag;
   }
 
+  // ----- keyboard shortcuts help -----
+  function renderShortcutsHelp() {
+    const frag = document.createDocumentFragment();
+    const scrim = h('div', { class: 'scrim', onClick: close });
+    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', style: { maxWidth: '460px' } });
+    frag.appendChild(scrim);
+    frag.appendChild(modal);
+    function close() { state.shortcutsOpen = false; scrim.remove(); modal.remove(); document.removeEventListener('keydown', onKey); }
+    const onKey = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    const mod = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+    const rows = [
+      [`${mod} K`, 'Open the command palette'],
+      [`${mod} N`, 'Create a new task'],
+      ['?', 'Show this help'],
+      ['Esc', 'Close dialogs, popovers & menus'],
+      ['Drag', 'Reorder cards/rows (Kanban, List) · reschedule (Calendar, Timeline)'],
+      ['Click a day', 'Create a task on that date (Calendar)'],
+      ['Enter', 'Open the focused task'],
+    ];
+    modal.appendChild(h('div', { class: 'modal-head' },
+      h('div', { class: 'modal-head-label' }, 'Help'),
+      h('div', { style: { fontSize: '17px', fontWeight: '500' } }, 'Keyboard & shortcuts'),
+    ));
+    const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', gap: '10px', padding: '18px 20px' } });
+    for (const [k, label] of rows) {
+      body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' } },
+        h('span', { style: { fontSize: '13px', color: 'var(--fg-1)' } }, label),
+        h('span', { class: 'kbd', style: { whiteSpace: 'nowrap' } }, k),
+      ));
+    }
+    modal.appendChild(body);
+    modal.appendChild(h('div', { class: 'modal-foot' },
+      h('span', { class: 'hint' }, 'Press ? anytime'),
+      h('button', { class: 'btn btn-primary', onClick: close }, 'Got it'),
+    ));
+    return frag;
+  }
+
   // ----- persistence -----
   function persist() {
     // Wrapped in try/catch because Safari private mode throws a QuotaError
@@ -1956,6 +2050,12 @@
       state.quickAddStatus = 'todo';
       state.quickAddDefaults = null;
       state.quickAddOpen = true;
+      renderApp();
+    }
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (shortcutBlocked()) return;
+      e.preventDefault();
+      state.shortcutsOpen = true;
       renderApp();
     }
   });

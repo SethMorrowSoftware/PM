@@ -47,6 +47,16 @@ A major upgrade toward Monday/Asana-grade depth, still 100% no-build / cPanel-fr
 
 See `docs/V2-CONTRACT.md` for the full v2 implementation spec.
 
+### Beyond v2
+
+- **v2.1** — **automation rules** (when→then, fired lazily in-request), **task
+  templates**, per-task **reminders**, and **CSV export**.
+- **v2.2** — **command palette** (⌘K), a **Workload** view, and a paginated,
+  filterable **Audit/Activity log**.
+- **v2.3** — saved views capture full **layout** (grouping/sort/columns), a
+  **compact/comfortable density** toggle, and a **keyboard-shortcuts help** (press `?`).
+- **v2.4** — **Goals / OKRs** (link goals to projects, auto or manual progress).
+
 For release validation coverage, see `docs/regression-checklist.md`.
 
 ## Tech stack

@@ -978,3 +978,31 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ----- Mobile bottom navigation (app-like; phones only) ----- */
+.mobile-bottom-nav { display: none; }
+@media (max-width: 980px) {
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 60;
+    background: var(--bg-1);
+    border-top: 1px solid var(--line);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+    justify-content: space-around;
+    align-items: stretch;
+  }
+  .mbn-item {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: none; border: 0; color: var(--fg-3);
+    font: inherit; font-size: 10.5px; font-weight: var(--fw-medium, 500);
+    padding: 4px 2px; cursor: pointer; border-radius: var(--radius-sm);
+    transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+  }
+  .mbn-item.active, .mbn-item.mbn-new { color: var(--acc-1); }
+  .mbn-item:active { background: var(--bg-3); }
+  /* keep scrollable content clear of the fixed bar */
+  .content { padding-bottom: 76px; }
+}

@@ -88,6 +88,12 @@ const API = {
   updateProject(id, patch)  { return this.patch(`projects.php?id=${id}`, patch); },
   deleteProject(id, force=false) { return this.del(`projects.php?id=${id}${force ? '&force=1' : ''}`); },
 
+  // ---- v2.6: project members & access ----
+  listProjectMembers(projectId)             { return this.get(`project_members.php?project_id=${projectId}`); },
+  addProjectMember(projectId, userId, role) { return this.post(`project_members.php?project_id=${projectId}`, { user_id: userId, role }); },
+  removeProjectMember(projectId, userId)    { return this.del(`project_members.php?project_id=${projectId}&user_id=${userId}`); },
+  setProjectVisibility(projectId, visibility) { return this.patch(`project_members.php?project_id=${projectId}`, { visibility }); },
+
   // ---- labels ----
   listLabels(opts = {})     {
     const parts = [];
@@ -159,6 +165,12 @@ const API = {
   createMilestone(data)           { return this.post('milestones.php', data); },
   updateMilestone(id, patch)      { return this.patch(`milestones.php?id=${id}`, patch); },
   deleteMilestone(id)             { return this.del(`milestones.php?id=${id}`); },
+
+  // ---- v2.4: goals / OKRs ----
+  listGoals()                     { return this.get('goals.php'); },
+  createGoal(data)                { return this.post('goals.php', data); },
+  updateGoal(id, patch)           { return this.patch(`goals.php?id=${id}`, patch); },
+  deleteGoal(id)                  { return this.del(`goals.php?id=${id}`); },
 
   // ---- v2: watchers / activity / reactions (task sub-routes) ----
   watchTask(taskId)               { return this.post(`tasks.php?id=${taskId}&watch=1`, {}); },

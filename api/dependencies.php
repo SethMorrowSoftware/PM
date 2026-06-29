@@ -1,7 +1,8 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 
@@ -26,6 +27,7 @@ function pm_dep_require_task(?int $id): int {
 
 if ($method === 'GET') {
     $taskId = pm_dep_require_task(pm_int_param('task_id'));
+    if (function_exists('pm_can_read_task') && !pm_can_read_task($uid, $taskId)) pm_error('Forbidden', 403);
 
     // blocked_by: tasks that task N depends on (depends_on_id where task_id = N).
     $blockedBy = pm_fetch_all(
@@ -55,6 +57,7 @@ if ($method === 'GET') {
 
 if ($method === 'POST') {
     $taskId = pm_dep_require_task(pm_int_param('task_id'));
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
     $dependsOnId = pm_int_param('depends_on_id');
     if ($dependsOnId === null) {
         $b = pm_body();
@@ -94,6 +97,7 @@ if ($method === 'POST') {
 
 if ($method === 'DELETE') {
     $taskId = pm_dep_require_task(pm_int_param('task_id'));
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
     $dependsOnId = pm_int_param('depends_on_id');
     if ($dependsOnId === null) pm_error('depends_on_id required');
     pm_exec(

@@ -33,5 +33,7 @@ rg -q "renderAdminExtras" assets/js/app.js
 rg -q "renderWorkload" assets/js/app.js
 rg -q "renderActivity" assets/js/app.js
 rg -q "openCmd|openCommandPalette" assets/js/app.js
+# v2.4 surface
+rg -q "renderGoals" assets/js/app.js
 
 echo "beta-smoke: OK"
