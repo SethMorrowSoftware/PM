@@ -56,6 +56,7 @@
       checklist: { expanded: {}, showCompleted: false },
       kanban:    { swimlane: 'none' },
       timeline:  { zoom: 'week', cursor: ymd(today()) },
+      activity:  { user_id: null, action: '', q: '' },
     },
   };
   // Apply persisted theme immediately (index.html also sets it pre-paint).
@@ -326,6 +327,42 @@
     toast(`Exported ${tasks.length} task${tasks.length === 1 ? '' : 's'}`, 'success');
   }
 
+  // ----- command palette (⌘K) item provider -----
+  function commandItems(query) {
+    const q = (query || '').trim().toLowerCase();
+    const cmds = [];
+    const add = (label, icon, run, hint) => cmds.push({ label, icon, run, hint });
+    const views = [
+      ['dashboard', 'Dashboard', 'dashboard'], ['kanban', 'Kanban', 'kanban'],
+      ['list', 'List', 'list'], ['checklist', 'My tasks', 'checkSquare'],
+      ['calendar', 'Calendar', 'calendar'], ['timeline', 'Timeline', 'gantt'],
+      ['workload', 'Workload', 'users'], ['activity', 'Activity', 'activity'],
+    ];
+    for (const [k, l, ic] of views) add(`Go to ${l}`, ic, () => { state.view = k; persist(); renderApp(); }, 'View');
+    add('New task', 'plus', () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); }, 'Create');
+    add('Settings', 'settings', () => { state.settingsOpen = true; renderApp(); }, 'Admin');
+    add(state.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme', state.theme === 'light' ? 'moon' : 'sun', () => toggleTheme(), 'Theme');
+    add('Export tasks to CSV', 'download', () => exportTasksCsv(filteredTasks()), 'Export');
+    add('Clear filters', 'x', () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }, 'Filter');
+    for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
+
+    const cmdMatches = q ? cmds.filter(c => c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q)) : cmds.slice(0, 9);
+    const pool = q
+      ? state.tasks.filter(t => t.title.toLowerCase().includes(q) || (t.ref || '').toLowerCase().includes(q))
+      : state.tasks.slice(0, 6);
+    const taskMatches = pool.slice(0, 8).map(t => ({
+      label: t.title, sublabel: t.ref, icon: 'checkSquare',
+      hint: projectById(t.project)?.name || '',
+      run: () => { state.openTaskId = t.id; setTaskHash(t.id); renderApp(); },
+    }));
+    return [...cmdMatches, ...taskMatches];
+  }
+  function openCmd() {
+    if (typeof openCommandPalette === 'function') openCommandPalette(commandItems);
+    else document.getElementById('global-search')?.focus();
+  }
+  window.pmOpenCommandPalette = () => openCmd();
+
   // ----- render root -----
   function renderApp() {
     if (window.innerWidth > 980 && state.mobileSidebarOpen) state.mobileSidebarOpen = false;
@@ -530,6 +567,8 @@
       case 'checklist': content.appendChild(renderChecklist(state.tasks, handlers)); break;
       case 'calendar':  content.appendChild(renderCalendar(tasks, handlers)); break;
       case 'timeline':  content.appendChild(renderTimeline(tasks, handlers)); break;
+      case 'workload':  content.appendChild(renderWorkload(tasks, handlers)); break;
+      case 'activity':  content.appendChild(renderActivity(state.tasks, handlers)); break;
       default: content.appendChild(h('div', { class: 'empty' }, 'Unknown view'));
     }
     return main;
@@ -582,7 +621,7 @@
       onClick: () => { state.mobileSidebarOpen = !state.mobileSidebarOpen; renderApp(); },
     }, Icon('list', 16)));
     const proj = state.filterProject ? projectById(state.filterProject) : null;
-    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline' };
+    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity' };
     bar.appendChild(h('div', { class: 'crumbs' },
       h('span', null, 'Workspace'),
       Icon('chevronRight', 12, 1.75, 'sep'),
@@ -653,6 +692,8 @@
       ['checklist', 'My tasks',  'checkSquare'],
       ['calendar',  'Calendar',  'calendar'],
       ['timeline',  'Timeline',  'gantt'],
+      ['workload',  'Workload',  'users'],
+      ['activity',  'Activity',  'activity'],
     ];
     const tabs = h('div', { class: 'view-tabs' });
     for (const [k, l, ic] of viewDef) {
@@ -1904,14 +1945,10 @@
   }
   window.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-      // Ctrl+K is "focus search" — allow it anywhere outside text fields,
-      // since the user is explicitly asking to jump to search.
+      // Ctrl/Cmd+K opens the command palette (search + jump-to-task + actions).
       if (state.quickAddOpen || state.settingsOpen || state.profileOpen) return;
-      const el = document.activeElement;
-      const tag = (el?.tagName || '').toUpperCase();
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable) return;
       e.preventDefault();
-      document.getElementById('global-search')?.focus();
+      openCmd();
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !e.shiftKey) {
       if (shortcutBlocked()) return;
