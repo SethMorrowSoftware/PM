@@ -229,6 +229,21 @@ recurring rules, user role changes, **custom-field definitions, and milestone
 create/edit/delete**. Attachment delete requires uploader-or-admin. Server-side
 checks remain authoritative.
 
+### Per-project access (v2.6, `api/access_lib.php`)
+Projects have a `visibility`: **`open`** (default — the legacy "every signed-in
+user can read & write" behavior, unchanged) or **`private`** (only `project_members`
+can read; role `editor`/`owner` can write, `viewer` is read-only). Global admins
+bypass everything. Enforcement is centralized in `access_lib.php`
+(`pm_can_read_project` / `pm_can_write_project` / `pm_can_manage_project` /
+`pm_readable_project_ids` / `pm_can_read_task` / `pm_can_write_task`) and called
+(guarded by `function_exists`, so it **fails open** if the file is absent) from
+`tasks.php` (list filter + a central read/write gate on every single-task op +
+create/bulk/move), `projects.php` (list filter + edit/delete gates that only bite
+on private projects), and the task-scoped endpoints (attachments/time/dependencies/
+custom-field-values/reminders). Tasks carry a `can_write` flag in their payload.
+Membership + visibility are managed in **Admin Settings → Project access**
+(`api/project_members.php`). Backward-compatible: every existing project is `open`.
+
 ## Don'ts
 
 - **Don't** introduce Composer, Node, a bundler, or a package manager.

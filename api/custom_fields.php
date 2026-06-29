@@ -1,7 +1,8 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 $id     = pm_int_param('id');
@@ -162,6 +163,7 @@ if ($method === 'PUT') {
     if (!$field) pm_error('Field not found', 404);
     $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
 
     $value = pm_param('value', null);
     if (is_array($value)) $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

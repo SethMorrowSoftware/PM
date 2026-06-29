@@ -6,6 +6,9 @@ require_once __DIR__ . '/notify_lib.php';
 // Optional automation engine — guarded include so a partial file upload can't
 // fatal the whole task API. Calls below are wrapped in function_exists().
 if (is_file(__DIR__ . '/automations_lib.php')) require_once __DIR__ . '/automations_lib.php';
+// Per-project access control. Guarded + function_exists()-checked at call sites
+// so an old/partial install simply falls back to the open all-can-edit model.
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
 pm_require_auth();
 
@@ -13,6 +16,17 @@ $id    = pm_int_param('id');
 $subId = pm_int_param('subtask_id');
 $commentId = pm_int_param('comment_id');
 $method = pm_method();
+
+// Per-project access gate for any operation on a specific task (the task itself
+// and all its sub-resources: comments, subtasks, watch, reactions, activity).
+// GET needs read access; any mutation needs write access. Open projects always
+// pass; private projects enforce membership/role. Non-existent tasks pass here
+// and 404 in their handler. Falls back to "allow" if access_lib is absent.
+if ($id !== null && function_exists('pm_can_read_task')) {
+    $accessUid = pm_current_user_id() ?? 0;
+    $ok = $method === 'GET' ? pm_can_read_task($accessUid, $id) : pm_can_write_task($accessUid, $id);
+    if (!$ok) pm_error('Forbidden', 403);
+}
 
 if (isset($_GET['bulk'])) {
     if ($method === 'PATCH') pm_bulk_update_tasks();
@@ -118,6 +132,9 @@ function pm_task_base_shape(array $t): array {
         'custom'      => (object)[],
         'created_at'  => $t['created_at'],
         'updated_at'  => $t['updated_at'],
+        'can_write'   => function_exists('pm_can_write_project')
+            ? pm_can_write_project(pm_current_user_id() ?? 0, (int)($t['project_id'] ?? 0))
+            : true,
     ];
 }
 
@@ -160,7 +177,17 @@ function pm_task_row_to_shape(array $t): array {
 }
 
 function pm_list_tasks(): void {
-    $rows = pm_fetch_all('SELECT * FROM tasks ORDER BY id DESC');
+    // Restrict to projects the user can read. null = no restriction (admin, or
+    // there are no private projects) → keep the cheap unfiltered query.
+    $readable = function_exists('pm_readable_project_ids')
+        ? pm_readable_project_ids(pm_current_user_id() ?? 0) : null;
+    if ($readable !== null) {
+        if (!$readable) { pm_json(['tasks' => []]); return; }
+        $ph = implode(',', array_fill(0, count($readable), '?'));
+        $rows = pm_fetch_all("SELECT * FROM tasks WHERE project_id IN ($ph) ORDER BY id DESC", $readable);
+    } else {
+        $rows = pm_fetch_all('SELECT * FROM tasks ORDER BY id DESC');
+    }
     if (!$rows) { pm_json(['tasks' => []]); return; }
 
     // Avoid N+1: pull related rows in one shot per table, then bucket in PHP.
@@ -308,6 +335,9 @@ function pm_create_task(): void {
     $proj = pm_fetch_one('SELECT * FROM projects WHERE id = ?', [$project]);
     if (!$proj) pm_error('Invalid project');
     if (!empty($proj['archived'])) pm_error('Cannot create tasks in an archived project', 409);
+    if (function_exists('pm_can_write_project') && !pm_can_write_project(pm_current_user_id() ?? 0, $project)) {
+        pm_error('Forbidden', 403);
+    }
 
     // milestone_id: optional; must belong to the same project when supplied.
     $milestoneId = pm_milestone_id_for_project(pm_param('milestone_id'), $project);
@@ -482,6 +512,9 @@ function pm_update_task(int $id): void {
         $proj = pm_fetch_one('SELECT id, archived FROM projects WHERE id = ?', [$nextProjectId]);
         if (!$proj) pm_error('Invalid project', 409);
         if (!empty($proj['archived'])) pm_error('Cannot move tasks into an archived project', 409);
+        if (function_exists('pm_can_write_project') && !pm_can_write_project(pm_current_user_id() ?? 0, $nextProjectId)) {
+            pm_error('Forbidden', 403);
+        }
         $fields[] = 'project_id = ?';
         $params[] = $nextProjectId;
     }
@@ -979,6 +1012,12 @@ function pm_bulk_update_tasks(): void {
     $body = pm_body();
     $ids = array_values(array_unique(array_map('intval', (array)($body['task_ids'] ?? []))));
     if (!$ids) pm_error('task_ids required');
+    // Drop tasks the user can't write (private projects they aren't an editor of).
+    if (function_exists('pm_can_write_task')) {
+        $buid = pm_current_user_id() ?? 0;
+        $ids = array_values(array_filter($ids, fn($tid) => pm_can_write_task($buid, $tid)));
+        if (!$ids) pm_json(['ok' => true, 'updated' => 0]);
+    }
     $patch = is_array($body['patch'] ?? null) ? $body['patch'] : [];
     if (!$patch) pm_error('patch required');
     // Reject bad patches once, before the loop — otherwise we'd partially

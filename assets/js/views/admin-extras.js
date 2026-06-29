@@ -46,7 +46,19 @@ window.renderAdminExtras = function () {
       // actions: [{type, value?, label_id?, user_id?, text?}]
       actions: [],
     },
+
+    // Project access: pick a project, then manage its visibility + member list.
+    paProjectId: '',     // '' = none chosen yet
+    paLoading: false,    // true while listProjectMembers is in flight
+    paBusy: false,       // true while a mutation (visibility/add/remove/role) is in flight
+    paErr: '',
+    paVisibility: '',    // 'open' | 'private' (as loaded from the server)
+    paMembers: [],       // [{user_id, role, user:{id,name,initials,color}}]
+    paAddUser: '',       // user_id selected in the add-member control
+    paAddRole: 'editor',
   };
+
+  const PROJECT_ROLES = ['owner', 'editor', 'viewer'];
 
   const TRIGGERS = [
     { id: 'task_created',   name: 'Task created' },
@@ -999,6 +1011,230 @@ window.renderAdminExtras = function () {
     body.appendChild(list);
   }
 
+  // ---------- project access ----------
+  function roleName(r) { return (r || '').charAt(0).toUpperCase() + (r || '').slice(1); }
+
+  // Load the chosen project's visibility + members. No-op when nothing is picked.
+  async function refreshProjectAccess() {
+    const pid = model.paProjectId === '' ? null : Number(model.paProjectId);
+    if (!pid) {
+      model.paVisibility = '';
+      model.paMembers = [];
+      model.paLoading = false;
+      redraw();
+      return;
+    }
+    model.paLoading = true;
+    model.paErr = '';
+    redraw();
+    try {
+      const r = await API.listProjectMembers(pid);
+      model.paVisibility = r.visibility || 'open';
+      model.paMembers = Array.isArray(r.members) ? r.members : [];
+    } catch (e) {
+      model.paErr = e.message || 'Failed to load project access';
+      model.paVisibility = '';
+      model.paMembers = [];
+      toast(e.message || 'Failed to load project access', 'error');
+    } finally {
+      model.paLoading = false;
+    }
+    redraw();
+  }
+
+  async function changeVisibility(value) {
+    const pid = model.paProjectId === '' ? null : Number(model.paProjectId);
+    if (!pid) return;
+    model.paBusy = true;
+    model.paErr = '';
+    redraw();
+    try {
+      await API.setProjectVisibility(pid, value);
+      toast(value === 'private' ? 'Project is now private' : 'Project is now open', 'success');
+      await refreshProjectAccess();
+    } catch (e) {
+      model.paErr = e.message || 'Failed to update visibility';
+      toast(e.message || 'Failed to update visibility', 'error');
+    } finally {
+      model.paBusy = false;
+      redraw();
+    }
+  }
+
+  async function addProjectMember(userId, role) {
+    const pid = model.paProjectId === '' ? null : Number(model.paProjectId);
+    if (!pid || !userId) return;
+    model.paBusy = true;
+    model.paErr = '';
+    redraw();
+    try {
+      await API.addProjectMember(pid, Number(userId), role);
+      toast('Member saved', 'success');
+      await refreshProjectAccess();
+    } catch (e) {
+      model.paErr = e.message || 'Failed to add member';
+      toast(e.message || 'Failed to add member', 'error');
+    } finally {
+      model.paBusy = false;
+      redraw();
+    }
+  }
+
+  async function setMemberRole(userId, role) {
+    // addProjectMember is an upsert on the server, so re-adding updates the role.
+    await addProjectMember(userId, role);
+  }
+
+  async function removeProjectMember(member) {
+    const pid = model.paProjectId === '' ? null : Number(model.paProjectId);
+    if (!pid) return;
+    const who = member.user?.name || `User #${member.user_id}`;
+    const ok = await confirmDialog({
+      title: 'Remove member?',
+      message: `${who} will lose access to this project.`,
+      confirmText: 'Remove',
+      danger: true,
+    });
+    if (!ok) return;
+    model.paBusy = true;
+    model.paErr = '';
+    redraw();
+    try {
+      await API.removeProjectMember(pid, member.user_id);
+      toast('Member removed', 'success');
+      await refreshProjectAccess();
+    } catch (e) {
+      model.paErr = e.message || 'Failed to remove member';
+      toast(e.message || 'Failed to remove member', 'error');
+    } finally {
+      model.paBusy = false;
+      redraw();
+    }
+  }
+
+  function renderProjectAccess(body) {
+    body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
+      h('div', null,
+        h('h3', null, 'Project access'),
+        h('div', { class: 'sub' }, 'Control who can see and edit a project. Open = every signed-in user can view & edit. Private = only members below.'),
+      ),
+    ));
+
+    // Project picker.
+    const form = h('div', { class: 'settings-form' });
+    form.appendChild(h('div', null,
+      h('label', null, 'Project'),
+      h('select', {
+        value: model.paProjectId,
+        onChange: e => {
+          model.paProjectId = e.target.value;
+          model.paAddUser = '';
+          model.paAddRole = 'editor';
+          refreshProjectAccess();
+        },
+      },
+        h('option', { value: '' }, 'Select project…'),
+        (state.projects || []).map(p => h('option', { value: String(p.id) }, p.name)),
+      ),
+    ));
+
+    if (model.paProjectId !== '' && model.paVisibility) {
+      form.appendChild(h('div', null,
+        h('label', null, 'Visibility'),
+        h('select', {
+          value: model.paVisibility,
+          disabled: model.paBusy || model.paLoading,
+          onChange: e => changeVisibility(e.target.value),
+        },
+          h('option', { value: 'open' }, 'Open — anyone signed in'),
+          h('option', { value: 'private' }, 'Private — members only'),
+        ),
+      ));
+    }
+    if (model.paErr) {
+      form.appendChild(h('div', { class: 'full' }, h('span', { class: 'err' }, model.paErr)));
+    }
+    body.appendChild(form);
+
+    if (model.paProjectId === '') {
+      body.appendChild(h('div', { class: 'empty' }, 'Select a project to manage its access.'));
+      return;
+    }
+    if (model.paLoading) {
+      body.appendChild(h('div', { class: 'empty' }, 'Loading project access…'));
+      return;
+    }
+    if (!model.paVisibility) return; // load failed; error already shown above.
+
+    // For open projects, membership is advisory until the project is made private.
+    if (model.paVisibility !== 'private') {
+      body.appendChild(h('div', { class: 'sub', style: { margin: '4px 0 10px' } },
+        'This project is Open, so membership is ignored until you set it to Private. You can pre-add members below.'));
+    }
+
+    // Members list.
+    const list = h('div', { class: 'settings-list' });
+    for (const m of model.paMembers) {
+      const u = m.user || userById(m.user_id) || null;
+      const name = u?.name || `User #${m.user_id}`;
+      list.appendChild(h('div', { class: 'settings-row' },
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title', style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            Avatar(u, 24),
+            name,
+          ),
+        ),
+        h('div', { class: 'row-actions' },
+          h('select', {
+            value: m.role,
+            disabled: model.paBusy,
+            title: 'Role',
+            onChange: e => setMemberRole(m.user_id, e.target.value),
+          }, PROJECT_ROLES.map(r => h('option', { value: r }, roleName(r)))),
+          h('button', { class: 'btn btn-ghost', disabled: model.paBusy, onClick: () => removeProjectMember(m) }, 'Remove'),
+        ),
+      ));
+    }
+    if (!model.paMembers.length) list.appendChild(h('div', { class: 'empty' }, 'No members yet.'));
+    body.appendChild(list);
+
+    // Add-member control: only users who aren't already members.
+    const memberIds = new Set(model.paMembers.map(m => Number(m.user_id)));
+    const available = (state.users || []).filter(u => !memberIds.has(Number(u.id)));
+    const addForm = h('div', { class: 'settings-form' });
+    addForm.appendChild(h('div', null,
+      h('label', null, 'Add member'),
+      h('select', {
+        value: model.paAddUser,
+        disabled: model.paBusy || !available.length,
+        onChange: e => { model.paAddUser = e.target.value; },
+      },
+        h('option', { value: '' }, available.length ? 'Select user…' : 'Everyone is a member'),
+        available.map(u => h('option', { value: String(u.id) }, u.name)),
+      ),
+    ));
+    addForm.appendChild(h('div', null,
+      h('label', null, 'Role'),
+      h('select', {
+        value: model.paAddRole,
+        disabled: model.paBusy || !available.length,
+        onChange: e => { model.paAddRole = e.target.value; },
+      }, PROJECT_ROLES.map(r => h('option', { value: r }, roleName(r)))),
+    ));
+    addForm.appendChild(h('div', { class: 'form-foot' },
+      h('button', {
+        class: 'btn btn-primary',
+        disabled: model.paBusy || !model.paAddUser,
+        onClick: () => {
+          const uid = model.paAddUser;
+          model.paAddUser = '';
+          addProjectMember(uid, model.paAddRole);
+        },
+      }, 'Add member'),
+    ));
+    body.appendChild(addForm);
+  }
+
   // ---------- render ----------
   function redraw() {
     root.replaceChildren();
@@ -1006,6 +1242,7 @@ window.renderAdminExtras = function () {
     renderCustomFields(root);
     renderTemplates(root);
     renderAutomations(root);
+    renderProjectAccess(root);
   }
 
   redraw();

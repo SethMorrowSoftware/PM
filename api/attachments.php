@@ -1,7 +1,8 @@
 <?php
 require_once __DIR__ . '/attachments_lib.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 $taskId = pm_int_param('task_id');
@@ -15,8 +16,10 @@ if ($method === 'DELETE' && $id !== null) pm_delete_attachment($id);
 pm_error('Method not allowed', 405);
 
 function pm_list_attachments(int $taskId): void {
+    global $uid;
     $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
+    if (function_exists('pm_can_read_task') && !pm_can_read_task($uid, $taskId)) pm_error('Forbidden', 403);
     $rows = pm_fetch_all(
         'SELECT id, task_id, original_name, mime_type, size_bytes, uploaded_by, created_at
          FROM task_attachments
@@ -28,8 +31,10 @@ function pm_list_attachments(int $taskId): void {
 }
 
 function pm_upload_attachment(int $taskId): void {
+    global $uid;
     $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
     if (!isset($_FILES['file'])) {
         $maxBytes = pm_ini_bytes((string)ini_get('post_max_size'));
         $contentLength = isset($_SERVER['CONTENT_LENGTH']) ? (int)$_SERVER['CONTENT_LENGTH'] : 0;
@@ -103,8 +108,11 @@ function pm_ini_bytes(string $val): int {
 }
 
 function pm_download_attachment(int $id): void {
+    global $uid;
     $row = pm_fetch_one('SELECT * FROM task_attachments WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
+    $taskId = (int)$row['task_id'];
+    if (function_exists('pm_can_read_task') && !pm_can_read_task($uid, $taskId)) pm_error('Forbidden', 403);
     $path = pm_attachment_abs_path((string)$row['stored_name']);
     if (!is_file($path)) pm_error('File missing on disk', 410);
 
@@ -126,10 +134,12 @@ function pm_download_attachment(int $id): void {
 }
 
 function pm_delete_attachment(int $id): void {
-    $row = pm_fetch_one('SELECT id, stored_name, uploaded_by FROM task_attachments WHERE id = ?', [$id]);
+    $row = pm_fetch_one('SELECT id, task_id, stored_name, uploaded_by FROM task_attachments WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
 
     $uid = pm_current_user_id();
+    $taskId = (int)$row['task_id'];
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
     $uploader = ($row['uploaded_by'] !== null) ? (int)$row['uploaded_by'] : null;
     $me = pm_current_user();
     $isAdmin = $me && !empty($me['is_admin']);

@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/slack_client.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
 pm_require_auth();
 
@@ -20,6 +21,7 @@ function pm_project_shape(array $r): array {
         'slack_channel' => $r['slack_channel'] ?? null,
         'archived'      => !empty($r['archived']),
         'archived_at'   => $r['archived_at']   ?? null,
+        'visibility'    => $r['visibility'] ?? (function_exists('pm_project_visibility') ? pm_project_visibility((int)$r['id']) : 'open'),
     ];
 }
 
@@ -33,6 +35,10 @@ if ($method === 'GET' && $id === null) {
          . ($onlyActive ? ' WHERE archived = 0' : '')
          . ' ORDER BY archived, sort_order, id';
     $rows = pm_fetch_all($sql);
+    if (function_exists('pm_can_read_project')) {
+        $ruid = pm_current_user_id() ?? 0;
+        $rows = array_values(array_filter($rows, fn($r) => pm_can_read_project($ruid, (int)$r['id'])));
+    }
     pm_json(['projects' => array_map('pm_project_shape', $rows)]);
 }
 
@@ -78,6 +84,11 @@ if ($method === 'POST' && $id === null) {
 
 if ($method === 'PATCH' && $id !== null) {
     $body = pm_body();
+    // Private projects: only editors/owners (or admins) may edit settings.
+    // Open projects pass (unchanged all-can-edit behavior).
+    if (function_exists('pm_can_write_project') && !pm_can_write_project(pm_current_user_id() ?? 0, $id)) {
+        pm_error('Forbidden', 403);
+    }
     $f = []; $p = [];
     if (isset($body['name']))   {
         $n = trim((string)$body['name']);
@@ -152,6 +163,11 @@ if ($method === 'PATCH' && $id !== null) {
 if ($method === 'DELETE' && $id !== null) {
     $row = pm_fetch_one('SELECT name FROM projects WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
+    // Deleting a private project requires owner/admin (open projects unchanged).
+    if (function_exists('pm_project_visibility') && pm_project_visibility($id) === 'private'
+        && function_exists('pm_can_manage_project') && !pm_can_manage_project(pm_current_user_id() ?? 0, $id)) {
+        pm_error('Forbidden', 403);
+    }
     // Guard hard delete: if any tasks (or recurring rules) reference the
     // project, require an explicit ?force=1 so a stray click can't wipe
     // history. Archive is the default advice.

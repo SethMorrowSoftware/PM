@@ -88,6 +88,12 @@ const API = {
   updateProject(id, patch)  { return this.patch(`projects.php?id=${id}`, patch); },
   deleteProject(id, force=false) { return this.del(`projects.php?id=${id}${force ? '&force=1' : ''}`); },
 
+  // ---- v2.6: project members & access ----
+  listProjectMembers(projectId)             { return this.get(`project_members.php?project_id=${projectId}`); },
+  addProjectMember(projectId, userId, role) { return this.post(`project_members.php?project_id=${projectId}`, { user_id: userId, role }); },
+  removeProjectMember(projectId, userId)    { return this.del(`project_members.php?project_id=${projectId}&user_id=${userId}`); },
+  setProjectVisibility(projectId, visibility) { return this.patch(`project_members.php?project_id=${projectId}`, { visibility }); },
+
   // ---- labels ----
   listLabels(opts = {})     {
     const parts = [];

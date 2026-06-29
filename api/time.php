@@ -1,6 +1,7 @@
 <?php
 // Time tracking: log + list + delete time_entries for a task.
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
 $uid = pm_require_auth();
 
@@ -47,6 +48,7 @@ function pm_time_total(int $taskId): int {
 if ($method === 'GET') {
     $taskId = pm_int_param('task_id');
     if (!$taskId) pm_error('task_id is required');
+    if (function_exists('pm_can_read_task') && !pm_can_read_task($uid, $taskId)) pm_error('Forbidden', 403);
     $rows = pm_fetch_all(
         'SELECT te.id, te.task_id, te.user_id, te.minutes, te.note, te.spent_on, te.created_at,
                 u.name AS user_name, u.initials AS user_initials, u.color AS user_color
@@ -67,6 +69,7 @@ if ($method === 'POST') {
     if (!$taskId) pm_error('task_id is required');
     $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
 
     $body = pm_body();
     $minutes = (int)($body['minutes'] ?? 0);
@@ -105,8 +108,9 @@ if ($method === 'POST') {
 
 if ($method === 'DELETE') {
     if (!$id) pm_error('id is required');
-    $row = pm_fetch_one('SELECT id, user_id FROM time_entries WHERE id = ?', [$id]);
+    $row = pm_fetch_one('SELECT id, task_id, user_id FROM time_entries WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
+    if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, (int)$row['task_id'])) pm_error('Forbidden', 403);
 
     $me = pm_current_user();
     $isAdmin = $me && !empty($me['is_admin']);

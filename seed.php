@@ -148,7 +148,7 @@ function sp_seed_data(): array {
             // v2 tables first (children), then the original set.
             'comment_reactions','comment_mentions','notifications','reminders','task_watchers',
             'task_custom_values','custom_fields','time_entries','task_dependencies','milestones',
-            'task_templates','automation_rules','goal_projects','goals',
+            'task_templates','automation_rules','goal_projects','goals','project_members',
             'task_attachments','saved_views','activity','comments','task_labels','task_assignees',
             'subtasks','tasks','recurring_rules','labels','projects','users','app_settings',
         ];
