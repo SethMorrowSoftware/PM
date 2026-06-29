@@ -3,6 +3,9 @@ require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/slack_client.php';
 require_once __DIR__ . '/attachments_lib.php';
 require_once __DIR__ . '/notify_lib.php';
+// Optional automation engine — guarded include so a partial file upload can't
+// fatal the whole task API. Calls below are wrapped in function_exists().
+if (is_file(__DIR__ . '/automations_lib.php')) require_once __DIR__ . '/automations_lib.php';
 pm_boot();
 pm_require_auth();
 
@@ -395,6 +398,10 @@ function pm_create_task(): void {
     }
 
     pm_slack_notify_task_event($t, $proj, 'task_created', 'created this task');
+    try {
+        if (function_exists('pm_run_automations')) pm_run_automations('task_created', $tid, $actor);
+    } catch (Throwable $_) { /* best effort */ }
+    $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$tid]) ?: $t;
     pm_json(['task' => pm_task_row_to_shape($t)]);
 }
 
@@ -551,6 +558,13 @@ function pm_update_task(int $id): void {
         } catch (Throwable $_) {}
         try { pm_notify_unblocked($id, $actor); } catch (Throwable $_) {}
     }
+
+    try {
+        if (function_exists('pm_run_automations') && $prevStatus !== 'done' && $t['status'] === 'done') {
+            pm_run_automations('task_completed', $id, $actor);
+            $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$id]) ?: $t;
+        }
+    } catch (Throwable $_) { /* best effort */ }
 
     pm_json(['task' => pm_task_row_to_shape($t)]);
 }
@@ -886,6 +900,10 @@ function pm_add_comment(int $taskId): void {
         } catch (Throwable $_) {}
         try { pm_add_watchers($taskId, [$uid]); } catch (Throwable $_) {}
     }
+
+    try {
+        if (function_exists('pm_run_automations')) pm_run_automations('comment_added', $taskId, $actor);
+    } catch (Throwable $_) { /* best effort */ }
 
     pm_json(['comment' => pm_comment_shape($r)]);
 }

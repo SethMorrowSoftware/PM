@@ -397,6 +397,42 @@ function pm_install_schema(): void {
             CONSTRAINT fk_react_comment FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
             CONSTRAINT fk_react_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2.1: task templates & automation rules ----------------------
+        "CREATE TABLE IF NOT EXISTS task_templates (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            project_id INT NULL,
+            name VARCHAR(120) NOT NULL,
+            title VARCHAR(500) NULL,
+            description TEXT NULL,
+            priority TINYINT NOT NULL DEFAULT 2,
+            estimate VARCHAR(32) NULL,
+            default_status VARCHAR(32) NOT NULL DEFAULT 'todo',
+            labels TEXT NULL,
+            assignees TEXT NULL,
+            subtasks_json TEXT NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_tt_project (project_id),
+            CONSTRAINT fk_tt_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS automation_rules (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            project_id INT NULL,
+            name VARCHAR(120) NOT NULL,
+            trigger_event VARCHAR(32) NOT NULL,
+            conditions_json TEXT NULL,
+            actions_json TEXT NOT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            run_count INT NOT NULL DEFAULT 0,
+            last_run_at TIMESTAMP NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_ar_event (trigger_event),
+            INDEX idx_ar_project (project_id),
+            CONSTRAINT fk_ar_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     foreach ($sql as $q) $pdo->exec($q);
 

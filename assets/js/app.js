@@ -46,6 +46,7 @@
     unread: 0,
     milestones: [],
     customFields: [],
+    templates: [],
     // theme: explicit user choice ('dark'|'light'); null = follow OS
     theme: localStorage.getItem('pm_theme') || 'dark',
     // view-local UI state, LIFTED here so it survives full re-renders
@@ -148,6 +149,10 @@
     return API.listCustomFields().then(r => { state.customFields = r.fields || []; renderApp(); })
       .catch(e => console.warn('Custom fields load failed:', e));
   }
+  function loadTemplates() {
+    return API.listTemplates().then(r => { state.templates = r.templates || []; renderApp(); })
+      .catch(e => console.warn('Templates load failed:', e));
+  }
   function toggleTheme() {
     state.theme = state.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = state.theme;
@@ -157,6 +162,7 @@
   loadNotifications();
   loadMilestones();
   loadCustomFields();
+  loadTemplates();
   // Light polling keeps the notification bell fresh without SSE/websockets,
   // which are impractical on shared cPanel hosting.
   setInterval(loadNotifications, 60000);
@@ -166,6 +172,7 @@
   window.pmLoadNotifications = () => loadNotifications();
   window.pmLoadMilestones = () => loadMilestones();
   window.pmLoadCustomFields = () => loadCustomFields();
+  window.pmLoadTemplates = () => loadTemplates();
   window.pmToggleTheme = () => toggleTheme();
 
   // ----- actions -----
@@ -289,6 +296,34 @@
       if (q && !t.title.toLowerCase().includes(q) && !t.ref.toLowerCase().includes(q)) return false;
       return true;
     });
+  }
+
+  // Export the currently-filtered tasks to a CSV download (client-side, no deps).
+  function exportTasksCsv(tasks) {
+    const esc = v => {
+      const s = v == null ? '' : String(v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const headers = ['Ref', 'Title', 'Project', 'Status', 'Priority', 'Assignees', 'Labels',
+      'Due', 'Start', 'Estimate', 'Time logged (min)', 'Milestone'];
+    const rows = tasks.map(t => [
+      t.ref, t.title,
+      projectById(t.project)?.name || '',
+      statusById(t.status)?.name || t.status,
+      PRIO_LABELS[t.priority] || '',
+      (t.assignees || []).map(id => userById(id)?.name || id).join('; '),
+      (t.labels || []).map(id => labelById(id)?.name || id).join('; '),
+      t.due || '', t.start_date || '', t.estimate || '', t.time_logged || 0,
+      (state.milestones.find(m => m.id == t.milestone_id)?.name) || '',
+    ]);
+    const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = h('a', { href: url, download: `castle-tasks-${ymd(today())}.csv` });
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
+    toast(`Exported ${tasks.length} task${tasks.length === 1 ? '' : 's'}`, 'success');
   }
 
   // ----- render root -----
@@ -727,6 +762,7 @@
       title: '', status: state.quickAddStatus || 'todo',
       project: defaults.projectId || state.filterProject || (state.projects[0] && state.projects[0].id),
       priority: 2, assignees, labels: [], due: defaults.due || null,
+      description: '', estimate: '', templateSubtasks: [],
     };
 
     const frag = document.createDocumentFragment();
@@ -747,8 +783,15 @@
         const t = await createTask({
           title, status: form.status, project: form.project,
           priority: form.priority, assignees: form.assignees, labels: form.labels,
-          due: form.due,
+          due: form.due, description: form.description || '', estimate: form.estimate || '',
         });
+        // Templates can carry subtasks — create them, then refresh so they show.
+        if (Array.isArray(form.templateSubtasks) && form.templateSubtasks.length) {
+          for (const st of form.templateSubtasks) {
+            try { await API.addSubtask(t.id, st); } catch (_) { /* best effort */ }
+          }
+          try { await refreshTasks(); } catch (_) { /* best effort */ }
+        }
         close();
         state.openTaskId = t.id;
         // Keep the URL hash in sync so the new task is shareable as a deep
@@ -757,6 +800,20 @@
         setTaskHash(t.id);
         renderApp();
       } catch (e) { toast(e.message, 'error'); }
+    }
+
+    function applyTemplate(tpl) {
+      if (tpl.title) form.title = tpl.title;
+      if (tpl.project_id) form.project = tpl.project_id;
+      if (tpl.priority != null) form.priority = tpl.priority;
+      if (tpl.default_status) form.status = tpl.default_status;
+      if (Array.isArray(tpl.assignees) && tpl.assignees.length) form.assignees = tpl.assignees.slice();
+      if (Array.isArray(tpl.labels) && tpl.labels.length) form.labels = tpl.labels.slice();
+      form.description = tpl.description || '';
+      form.estimate = tpl.estimate || '';
+      form.templateSubtasks = Array.isArray(tpl.subtasks) ? tpl.subtasks.slice() : [];
+      toast(`Applied template "${tpl.name}"`, 'success');
+      redraw();
     }
 
     function redraw() {
@@ -809,6 +866,24 @@
         onCreateLabel: createLabelFromPicker,
       })));
       body.appendChild(lblBtn);
+
+      if ((state.templates || []).length) {
+        const applied = form.templateSubtasks.length || form.description;
+        const tplBtn = h('button', { class: 'chip' }, Icon('archive', 11), ' ', applied ? 'Template applied' : 'Use template');
+        tplBtn.addEventListener('click', () => openPopover(tplBtn, ({ close }) => {
+          const wrap = h('div', { style: { minWidth: '220px', padding: '4px' } });
+          wrap.appendChild(h('div', { class: 'popover-header' }, 'Start from template'));
+          const tpls = (state.templates || []).filter(t => t.project_id == null || t.project_id == form.project);
+          if (!tpls.length) wrap.appendChild(h('div', { class: 'empty', style: { padding: '10px' } }, 'No templates for this project'));
+          tpls.forEach(t => wrap.appendChild(PopoverItem({
+            selected: false,
+            onSelect: () => { applyTemplate(t); close(); },
+            children: h('span', null, t.name),
+          })));
+          return wrap;
+        }));
+        body.appendChild(tplBtn);
+      }
 
       modal.appendChild(body);
 

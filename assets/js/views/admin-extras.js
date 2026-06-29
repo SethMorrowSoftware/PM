@@ -24,7 +24,46 @@ window.renderAdminExtras = function () {
     cfSaving: false,
     fields: [],
     cfForm: { id: null, project_id: '', name: '', field_type: 'text', options: '' },
+
+    tplLoading: true,
+    tplErr: '',
+    tplSaving: false,
+    templates: [],
+    tplForm: {
+      id: null, project_id: '', name: '', title: '', description: '',
+      priority: 2, estimate: '', default_status: 'todo',
+      labels: [], assignees: [], subtasks: '',
+    },
+
+    autoLoading: true,
+    autoErr: '',
+    autoSaving: false,
+    automations: [],
+    autoForm: {
+      id: null, project_id: '', name: '', trigger_event: 'task_created', enabled: true,
+      // conditions
+      condPriority: '', condStatus: '', condLabel: '',
+      // actions: [{type, value?, label_id?, user_id?, text?}]
+      actions: [],
+    },
   };
+
+  const TRIGGERS = [
+    { id: 'task_created',   name: 'Task created' },
+    { id: 'task_completed', name: 'Task completed' },
+    { id: 'comment_added',  name: 'Comment added' },
+    { id: 'due_soon',       name: 'Due soon' },
+  ];
+  const ACTION_TYPES = [
+    { id: 'set_priority', name: 'Set priority',  field: 'priority' },
+    { id: 'set_status',   name: 'Set status',    field: 'status' },
+    { id: 'add_label',    name: 'Add label',     field: 'label' },
+    { id: 'assign',       name: 'Assign user',   field: 'user' },
+    { id: 'add_watcher',  name: 'Add watcher',   field: 'user' },
+    { id: 'notify',       name: 'Notify user',   field: 'user+text' },
+    { id: 'comment',      name: 'Add comment',   field: 'text' },
+  ];
+  const PRIOS = ['Urgent', 'High', 'Medium', 'Low'];
 
   // Root we own and redraw into. A plain div so the lead can append it once.
   const root = h('div', { class: 'admin-extras' });
@@ -41,6 +80,16 @@ window.renderAdminExtras = function () {
   function projectColor(projectId) {
     return projectById(projectId)?.color || 'var(--fg-3)';
   }
+  // Non-archived labels visible in a scope (global scope = global labels only;
+  // a project scope = its own labels + global labels), mirroring app.js.
+  function labelsInScope(projectIdStr) {
+    const pid = projectIdStr === '' ? null : Number(projectIdStr);
+    return (state.labels || []).filter(l =>
+      !l.archived && (l.project_id == null || (pid != null && Number(l.project_id) === pid))
+    );
+  }
+  function priorityName(p) { return PRIOS[Number(p)] ?? '—'; }
+  function statusName(id) { return (window.STATUSES || []).find(s => s.id === id)?.name || id || '—'; }
 
   // ---------- milestones ----------
   function resetMsForm(ms = null) {
@@ -386,15 +435,583 @@ window.renderAdminExtras = function () {
     body.appendChild(list);
   }
 
+  // ---------- task templates ----------
+  function resetTplForm(t = null) {
+    model.tplErr = '';
+    const f = model.tplForm;
+    f.id = t?.id ?? null;
+    f.project_id = t?.project_id != null ? String(t.project_id) : '';
+    f.name = t?.name ?? '';
+    f.title = t?.title ?? '';
+    f.description = t?.description ?? '';
+    f.priority = t?.priority != null ? Number(t.priority) : 2;
+    f.estimate = t?.estimate != null && t?.estimate !== '' ? String(t.estimate) : '';
+    f.default_status = t?.default_status ?? 'todo';
+    f.labels = Array.isArray(t?.labels) ? t.labels.map(Number) : [];
+    f.assignees = Array.isArray(t?.assignees) ? t.assignees.map(Number) : [];
+    f.subtasks = Array.isArray(t?.subtasks) ? t.subtasks.join('\n') : '';
+  }
+
+  async function refreshTemplates() {
+    model.tplLoading = true;
+    redraw();
+    try {
+      const r = await API.listTemplates();
+      model.templates = r.templates || [];
+    } catch (e) {
+      model.tplErr = e.message || 'Failed to load templates';
+      toast(e.message || 'Failed to load templates', 'error');
+    } finally {
+      model.tplLoading = false;
+    }
+    redraw();
+  }
+
+  async function saveTemplate() {
+    const f = model.tplForm;
+    const payload = {
+      project_id: f.project_id === '' ? null : Number(f.project_id),
+      name: (f.name || '').trim(),
+      title: (f.title || '').trim(),
+      description: (f.description || '').trim(),
+      priority: Number(f.priority),
+      estimate: f.estimate === '' ? null : Number(f.estimate),
+      default_status: f.default_status,
+      labels: f.labels.slice(),
+      assignees: f.assignees.slice(),
+      subtasks: (f.subtasks || '').split('\n').map(s => s.trim()).filter(Boolean),
+    };
+    if (!payload.name) { model.tplErr = 'Name is required'; redraw(); return; }
+    model.tplSaving = true;
+    model.tplErr = '';
+    redraw();
+    try {
+      if (f.id) await API.updateTemplate(f.id, payload);
+      else await API.createTemplate(payload);
+      resetTplForm();
+      await refreshTemplates();
+      window.pmLoadTemplates?.();
+      toast(f.id ? 'Template updated' : 'Template created', 'success');
+    } catch (e) {
+      model.tplErr = e.message || 'Failed to save template';
+      toast(e.message || 'Failed to save template', 'error');
+    } finally {
+      model.tplSaving = false;
+      redraw();
+    }
+  }
+
+  async function deleteTemplate(tpl) {
+    const ok = await confirmDialog({
+      title: 'Delete template?',
+      message: `“${tpl.name}” will be removed from quick-add.`,
+      confirmText: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await API.deleteTemplate(tpl.id);
+      if (model.tplForm.id === tpl.id) resetTplForm();
+      await refreshTemplates();
+      window.pmLoadTemplates?.();
+      toast('Template deleted', 'success');
+    } catch (e) {
+      toast(e.message || 'Failed to delete template', 'error');
+    }
+  }
+
+  function checkboxList(items, selected, onToggle, emptyText) {
+    const wrap = h('div', {
+      class: 'ax-checks',
+      style: {
+        display: 'flex', flexWrap: 'wrap', gap: '6px 14px',
+        maxHeight: '120px', overflowY: 'auto',
+        padding: '6px 8px', border: '1px solid var(--bd-1)', borderRadius: '6px',
+        background: 'var(--bg-2)',
+      },
+    });
+    if (!items.length) { wrap.appendChild(h('span', { class: 'sub' }, emptyText)); return wrap; }
+    for (const it of items) {
+      const checked = selected.includes(it.id);
+      wrap.appendChild(h('label', {
+        style: { display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px' },
+      },
+        h('input', { type: 'checkbox', checked, onChange: () => onToggle(it.id) }),
+        it.node || it.name,
+      ));
+    }
+    return wrap;
+  }
+
+  function renderTemplates(body) {
+    body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
+      h('div', null,
+        h('h3', null, 'Task templates'),
+        h('div', { class: 'sub' }, 'Reusable task blueprints surfaced in quick-add, global or scoped to a project.'),
+      ),
+    ));
+
+    const f = model.tplForm;
+    const form = h('div', { class: 'settings-form' });
+    form.appendChild(h('div', null,
+      h('label', null, 'Scope'),
+      h('select', {
+        value: f.project_id,
+        // Re-render so the in-scope label list updates when scope changes.
+        onChange: e => { f.project_id = e.target.value; f.labels = f.labels.filter(id => labelsInScope(f.project_id).some(l => l.id === id)); redraw(); },
+      },
+        h('option', { value: '' }, 'Global'),
+        (state.projects || []).map(p => h('option', { value: String(p.id) }, p.name)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Template name'),
+      h('input', { type: 'text', value: f.name, onInput: e => { f.name = e.target.value; } }),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Task title'),
+      h('input', { type: 'text', value: f.title, onInput: e => { f.title = e.target.value; } }),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Priority'),
+      h('select', {
+        value: String(f.priority),
+        onChange: e => { f.priority = Number(e.target.value); },
+      },
+        PRIOS.map((name, i) => h('option', { value: String(i) }, name)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Default status'),
+      h('select', {
+        value: f.default_status,
+        onChange: e => { f.default_status = e.target.value; },
+      },
+        (window.STATUSES || []).map(s => h('option', { value: s.id }, s.name)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Estimate (min)'),
+      h('input', { type: 'number', min: '0', value: f.estimate, onInput: e => { f.estimate = e.target.value; } }),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Description'),
+      h('textarea', { value: f.description, onInput: e => { f.description = e.target.value; } }),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Labels'),
+      checkboxList(
+        labelsInScope(f.project_id).map(l => ({ id: l.id, node: Tag(l.id, true) })),
+        f.labels,
+        id => { f.labels = f.labels.includes(id) ? f.labels.filter(x => x !== id) : [...f.labels, id]; redraw(); },
+        'No labels in this scope.',
+      ),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Assignees'),
+      checkboxList(
+        (state.users || []).map(u => ({ id: u.id, name: u.name })),
+        f.assignees,
+        id => { f.assignees = f.assignees.includes(id) ? f.assignees.filter(x => x !== id) : [...f.assignees, id]; redraw(); },
+        'No users.',
+      ),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Subtasks (one per line)'),
+      h('textarea', { placeholder: 'Draft outline\nReview with team', value: f.subtasks, onInput: e => { f.subtasks = e.target.value; } }),
+    ));
+    form.appendChild(h('div', { class: 'form-foot' },
+      model.tplErr ? h('span', { class: 'err' }, model.tplErr) : null,
+      f.id ? h('button', { class: 'btn btn-ghost', onClick: () => { resetTplForm(); redraw(); } }, 'Cancel edit') : null,
+      h('button', { class: 'btn btn-primary', disabled: model.tplSaving, onClick: saveTemplate }, f.id ? 'Save template' : 'Create template'),
+    ));
+    body.appendChild(form);
+
+    if (model.tplLoading) { body.appendChild(h('div', { class: 'empty' }, 'Loading templates…')); return; }
+
+    const list = h('div', { class: 'settings-list' });
+    for (const tpl of model.templates) {
+      const subCount = Array.isArray(tpl.subtasks) ? tpl.subtasks.length : 0;
+      list.appendChild(h('div', { class: 'settings-row' },
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title' },
+            tpl.name,
+            h('span', { class: 'pill muted' }, scopeName(tpl.project_id)),
+          ),
+          h('div', { class: 'row-meta' },
+            h('span', null, priorityName(tpl.priority)),
+            h('span', null, statusName(tpl.default_status)),
+            h('span', null, `${subCount} subtask${subCount === 1 ? '' : 's'}`),
+          ),
+        ),
+        h('div', { class: 'row-actions' },
+          h('button', { class: 'btn btn-ghost', onClick: () => { resetTplForm(tpl); redraw(); } }, 'Edit'),
+          h('button', { class: 'btn btn-ghost', onClick: () => deleteTemplate(tpl) }, 'Delete'),
+        ),
+      ));
+    }
+    if (!model.templates.length) list.appendChild(h('div', { class: 'empty' }, 'No templates yet.'));
+    body.appendChild(list);
+  }
+
+  // ---------- automation rules ----------
+  function resetAutoForm(a = null) {
+    model.autoErr = '';
+    const f = model.autoForm;
+    f.id = a?.id ?? null;
+    f.project_id = a?.project_id != null ? String(a.project_id) : '';
+    f.name = a?.name ?? '';
+    f.trigger_event = a?.trigger_event ?? 'task_created';
+    f.enabled = a?.enabled != null ? !!a.enabled : true;
+    const c = a?.conditions || {};
+    f.condPriority = c.priority != null ? String(c.priority) : '';
+    f.condStatus = c.status != null ? String(c.status) : '';
+    f.condLabel = c.label_id != null ? String(c.label_id) : '';
+    // Normalize actions into editable rows.
+    f.actions = Array.isArray(a?.actions) ? a.actions.map(normalizeAction) : [];
+  }
+  function normalizeAction(a) {
+    const t = a?.type || 'set_priority';
+    return {
+      type: t,
+      value: a?.value != null ? a.value : '',
+      label_id: a?.label_id != null ? String(a.label_id) : '',
+      user_id: a?.user_id != null ? String(a.user_id) : '',
+      text: a?.text != null ? a.text : '',
+    };
+  }
+  function blankAction() {
+    return { type: 'set_priority', value: '0', label_id: '', user_id: '', text: '' };
+  }
+
+  async function refreshAutomations() {
+    model.autoLoading = true;
+    redraw();
+    try {
+      const r = await API.listAutomations();
+      model.automations = r.automations || [];
+    } catch (e) {
+      model.autoErr = e.message || 'Failed to load automations';
+      toast(e.message || 'Failed to load automations', 'error');
+    } finally {
+      model.autoLoading = false;
+    }
+    redraw();
+  }
+
+  // Build the actions[] payload from editable rows, keeping only the fields each
+  // action type uses (must match the backend VOCAB exactly).
+  function serializeActions() {
+    return model.autoForm.actions.map(a => {
+      switch (a.type) {
+        case 'set_priority': return { type: 'set_priority', value: Number(a.value) };
+        case 'set_status':   return { type: 'set_status', value: a.value };
+        case 'add_label':    return { type: 'add_label', label_id: Number(a.label_id) };
+        case 'assign':       return { type: 'assign', user_id: Number(a.user_id) };
+        case 'add_watcher':  return { type: 'add_watcher', user_id: Number(a.user_id) };
+        case 'notify':       return { type: 'notify', user_id: Number(a.user_id), text: (a.text || '').trim() || undefined };
+        case 'comment':      return { type: 'comment', text: (a.text || '').trim() };
+        default:             return { type: a.type };
+      }
+    });
+  }
+  function actionIsValid(a) {
+    switch (a.type) {
+      case 'set_priority': return a.value !== '' && !Number.isNaN(Number(a.value));
+      case 'set_status':   return !!a.value;
+      case 'add_label':    return !!a.label_id;
+      case 'assign':
+      case 'add_watcher':
+      case 'notify':       return !!a.user_id;
+      case 'comment':      return !!(a.text || '').trim();
+      default:             return false;
+    }
+  }
+
+  function buildConditions() {
+    const f = model.autoForm;
+    const c = {};
+    if (f.condPriority !== '') c.priority = Number(f.condPriority);
+    if (f.condStatus !== '') c.status = f.condStatus;
+    if (f.condLabel !== '') c.label_id = Number(f.condLabel);
+    return c;
+  }
+
+  async function saveAutomation() {
+    const f = model.autoForm;
+    const name = (f.name || '').trim();
+    if (!name) { model.autoErr = 'Name is required'; redraw(); return; }
+    if (!f.trigger_event) { model.autoErr = 'Trigger is required'; redraw(); return; }
+    if (!f.actions.length) { model.autoErr = 'Add at least one action'; redraw(); return; }
+    if (!f.actions.every(actionIsValid)) { model.autoErr = 'Every action needs its value filled in'; redraw(); return; }
+    const payload = {
+      project_id: f.project_id === '' ? null : Number(f.project_id),
+      name,
+      trigger_event: f.trigger_event,
+      conditions: buildConditions(),
+      actions: serializeActions(),
+      enabled: !!f.enabled,
+    };
+    model.autoSaving = true;
+    model.autoErr = '';
+    redraw();
+    try {
+      if (f.id) await API.updateAutomation(f.id, payload);
+      else await API.createAutomation(payload);
+      resetAutoForm();
+      await refreshAutomations();
+      toast(f.id ? 'Automation updated' : 'Automation created', 'success');
+    } catch (e) {
+      model.autoErr = e.message || 'Failed to save automation';
+      toast(e.message || 'Failed to save automation', 'error');
+    } finally {
+      model.autoSaving = false;
+      redraw();
+    }
+  }
+
+  async function toggleAutomation(rule) {
+    try {
+      await API.updateAutomation(rule.id, { enabled: !rule.enabled });
+      await refreshAutomations();
+    } catch (e) {
+      toast(e.message || 'Failed to update automation', 'error');
+    }
+  }
+
+  async function deleteAutomation(rule) {
+    const ok = await confirmDialog({
+      title: 'Delete automation?',
+      message: `“${rule.name}” will stop running.`,
+      confirmText: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await API.deleteAutomation(rule.id);
+      if (model.autoForm.id === rule.id) resetAutoForm();
+      await refreshAutomations();
+      toast('Automation deleted', 'success');
+    } catch (e) {
+      toast(e.message || 'Failed to delete automation', 'error');
+    }
+  }
+
+  function triggerName(id) { return TRIGGERS.find(t => t.id === id)?.name || id; }
+
+  function conditionSummary(conds) {
+    const c = conds || {};
+    const parts = [];
+    if (c.priority != null) parts.push(`priority ${priorityName(c.priority)}`);
+    if (c.status != null) parts.push(`status ${statusName(c.status)}`);
+    if (c.label_id != null) parts.push(`label ${labelById(c.label_id)?.name || '#' + c.label_id}`);
+    return parts.join(' & ');
+  }
+  function actionSummary(a) {
+    switch (a.type) {
+      case 'set_priority': return `set priority ${priorityName(a.value)}`;
+      case 'set_status':   return `set status ${statusName(a.value)}`;
+      case 'add_label':    return `add label ${labelById(a.label_id)?.name || '#' + a.label_id}`;
+      case 'assign':       return `assign ${userById(a.user_id)?.name || '#' + a.user_id}`;
+      case 'add_watcher':  return `watch as ${userById(a.user_id)?.name || '#' + a.user_id}`;
+      case 'notify':       return `notify ${userById(a.user_id)?.name || '#' + a.user_id}`;
+      case 'comment':      return `comment "${(a.text || '').slice(0, 24)}"`;
+      default:             return a.type;
+    }
+  }
+  function ruleSummary(rule) {
+    const cond = conditionSummary(rule.conditions);
+    const acts = (rule.actions || []).map(actionSummary).join(', ') || 'no actions';
+    return `When ${triggerName(rule.trigger_event)}${cond ? ` if ${cond}` : ''} → ${acts}`;
+  }
+
+  // One editable action row inside the builder.
+  function actionRow(a, idx) {
+    const def = ACTION_TYPES.find(t => t.id === a.type) || ACTION_TYPES[0];
+    const row = h('div', {
+      class: 'ax-action-row',
+      style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' },
+    });
+    row.appendChild(h('select', {
+      value: a.type,
+      onChange: e => {
+        a.type = e.target.value;
+        // Seed a sensible default value for the newly chosen type.
+        const nd = ACTION_TYPES.find(t => t.id === a.type);
+        if (nd?.field === 'priority' && a.value === '') a.value = '0';
+        redraw();
+      },
+    }, ACTION_TYPES.map(t => h('option', { value: t.id }, t.name))));
+
+    // Value control depends on the action's field kind.
+    if (def.field === 'priority') {
+      row.appendChild(h('select', {
+        value: String(a.value === '' ? '0' : a.value),
+        onChange: e => { a.value = e.target.value; },
+      }, PRIOS.map((n, i) => h('option', { value: String(i) }, n))));
+    } else if (def.field === 'status') {
+      row.appendChild(h('select', {
+        value: a.value || (window.STATUSES?.[0]?.id ?? ''),
+        onChange: e => { a.value = e.target.value; },
+      }, (window.STATUSES || []).map(s => h('option', { value: s.id }, s.name))));
+    } else if (def.field === 'label') {
+      row.appendChild(h('select', {
+        value: a.label_id,
+        onChange: e => { a.label_id = e.target.value; },
+      },
+        h('option', { value: '' }, 'Select label…'),
+        labelsInScope(model.autoForm.project_id).map(l => h('option', { value: String(l.id) }, l.name)),
+      ));
+    } else if (def.field === 'user' || def.field === 'user+text') {
+      row.appendChild(h('select', {
+        value: a.user_id,
+        onChange: e => { a.user_id = e.target.value; },
+      },
+        h('option', { value: '' }, 'Select user…'),
+        (state.users || []).map(u => h('option', { value: String(u.id) }, u.name)),
+      ));
+    }
+    if (def.field === 'text' || def.field === 'user+text') {
+      row.appendChild(h('input', {
+        type: 'text',
+        placeholder: def.field === 'user+text' ? 'Message (optional)' : 'Comment text',
+        value: a.text,
+        style: { flex: '1', minWidth: '140px' },
+        onInput: e => { a.text = e.target.value; },
+      }));
+    }
+
+    row.appendChild(h('button', {
+      class: 'btn btn-ghost', title: 'Remove action',
+      onClick: () => { model.autoForm.actions.splice(idx, 1); redraw(); },
+    }, Icon('x', 14)));
+    return row;
+  }
+
+  function renderAutomations(body) {
+    body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
+      h('div', null,
+        h('h3', null, 'Automation rules'),
+        h('div', { class: 'sub' }, 'Run actions automatically when a trigger fires, optionally filtered by conditions.'),
+      ),
+    ));
+
+    const f = model.autoForm;
+    const form = h('div', { class: 'settings-form' });
+    form.appendChild(h('div', null,
+      h('label', null, 'Scope'),
+      h('select', {
+        value: f.project_id,
+        onChange: e => { f.project_id = e.target.value; if (f.condLabel && !labelsInScope(f.project_id).some(l => String(l.id) === f.condLabel)) f.condLabel = ''; redraw(); },
+      },
+        h('option', { value: '' }, 'Global'),
+        (state.projects || []).map(p => h('option', { value: String(p.id) }, p.name)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Rule name'),
+      h('input', { type: 'text', value: f.name, onInput: e => { f.name = e.target.value; } }),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Trigger'),
+      h('select', {
+        value: f.trigger_event,
+        onChange: e => { f.trigger_event = e.target.value; },
+      }, TRIGGERS.map(t => h('option', { value: t.id }, t.name))),
+    ));
+
+    // Conditions
+    form.appendChild(h('div', null,
+      h('label', null, 'If priority'),
+      h('select', { value: f.condPriority, onChange: e => { f.condPriority = e.target.value; } },
+        h('option', { value: '' }, 'Any'),
+        PRIOS.map((n, i) => h('option', { value: String(i) }, n)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'If status'),
+      h('select', { value: f.condStatus, onChange: e => { f.condStatus = e.target.value; } },
+        h('option', { value: '' }, 'Any'),
+        (window.STATUSES || []).map(s => h('option', { value: s.id }, s.name)),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'If label'),
+      h('select', { value: f.condLabel, onChange: e => { f.condLabel = e.target.value; } },
+        h('option', { value: '' }, 'Any'),
+        labelsInScope(f.project_id).map(l => h('option', { value: String(l.id) }, l.name)),
+      ),
+    ));
+
+    // Actions builder
+    const actionsWrap = h('div', { class: 'full' },
+      h('label', null, 'Actions'),
+    );
+    const rows = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
+    if (!f.actions.length) rows.appendChild(h('div', { class: 'sub' }, 'No actions yet — add one below.'));
+    f.actions.forEach((a, i) => rows.appendChild(actionRow(a, i)));
+    actionsWrap.appendChild(rows);
+    actionsWrap.appendChild(h('button', {
+      class: 'btn btn-ghost', style: { marginTop: '8px' },
+      onClick: () => { f.actions.push(blankAction()); redraw(); },
+    }, Icon('plus', 14), ' Add action'));
+    form.appendChild(actionsWrap);
+
+    form.appendChild(h('div', { class: 'full' },
+      h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer' } },
+        h('input', { type: 'checkbox', checked: f.enabled, onChange: e => { f.enabled = e.target.checked; } }),
+        'Enabled',
+      ),
+    ));
+
+    form.appendChild(h('div', { class: 'form-foot' },
+      model.autoErr ? h('span', { class: 'err' }, model.autoErr) : null,
+      f.id ? h('button', { class: 'btn btn-ghost', onClick: () => { resetAutoForm(); redraw(); } }, 'Cancel edit') : null,
+      h('button', { class: 'btn btn-primary', disabled: model.autoSaving, onClick: saveAutomation }, f.id ? 'Save rule' : 'Create rule'),
+    ));
+    body.appendChild(form);
+
+    if (model.autoLoading) { body.appendChild(h('div', { class: 'empty' }, 'Loading automations…')); return; }
+
+    const list = h('div', { class: 'settings-list' });
+    for (const rule of model.automations) {
+      const on = !!rule.enabled;
+      list.appendChild(h('div', { class: 'settings-row' + (on ? '' : ' archived') },
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title' },
+            rule.name,
+            h('span', { class: 'pill muted' }, scopeName(rule.project_id)),
+            on ? h('span', { class: 'pill ok' }, 'On') : h('span', { class: 'pill muted' }, 'Off'),
+          ),
+          h('div', { class: 'row-meta' },
+            h('span', null, ruleSummary(rule)),
+            rule.run_count != null ? h('span', null, `ran ${rule.run_count}×`) : null,
+          ),
+        ),
+        h('div', { class: 'row-actions' },
+          h('button', { class: 'btn btn-ghost', onClick: () => toggleAutomation(rule) }, on ? 'Disable' : 'Enable'),
+          h('button', { class: 'btn btn-ghost', onClick: () => { resetAutoForm(rule); redraw(); } }, 'Edit'),
+          h('button', { class: 'btn btn-ghost', onClick: () => deleteAutomation(rule) }, 'Delete'),
+        ),
+      ));
+    }
+    if (!model.automations.length) list.appendChild(h('div', { class: 'empty' }, 'No automation rules yet.'));
+    body.appendChild(list);
+  }
+
   // ---------- render ----------
   function redraw() {
     root.replaceChildren();
     renderMilestones(root);
     renderCustomFields(root);
+    renderTemplates(root);
+    renderAutomations(root);
   }
 
   redraw();
   refreshMilestones();
   refreshCustomFields();
+  refreshTemplates();
+  refreshAutomations();
   return root;
 };

@@ -19,7 +19,7 @@ function pmDrawerCache(taskId) {
     window._pmAttachmentsCache = {};
   }
   return (window._pmDrawerCache[taskId] = window._pmDrawerCache[taskId] || {
-    comments: null, activity: null, deps: null, time: null, _focused: false,
+    comments: null, activity: null, deps: null, time: null, reminders: null, _focused: false,
   });
 }
 
@@ -44,10 +44,13 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
   let newBlockerQuery = '';
   let logMinutes = '';
   let logNote = '';
+  let newReminderAt = '';
+  let newReminderEveryone = false;
   let comments = cache.comments;
   let activity = cache.activity;
   let deps = cache.deps;
   let timeData = cache.time;
+  let reminders = cache.reminders;
   let attachments = window._pmAttachmentsCache[task.id] || null;
   let uploadingAttachment = false;
 
@@ -91,11 +94,20 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       redraw();
     } catch (e) { toast('Could not load attachments: ' + e.message, 'error'); }
   }
+  async function loadReminders() {
+    try {
+      const r = await API.listReminders(task.id);
+      reminders = r.reminders || [];
+      cache.reminders = reminders;
+      redraw();
+    } catch (e) { toast('Could not load reminders: ' + e.message, 'error'); }
+  }
   if (comments === null) loadComments();
   if (activity === null) loadActivity();
   if (deps === null) loadDeps();
   if (timeData === null) loadTime();
   if (attachments === null) loadAttachments();
+  if (reminders === null) loadReminders();
 
   // After mutating board-visible data, refresh the shared task list so other
   // views stay consistent. renderApp() rebuilds this drawer from state.tasks;
@@ -163,8 +175,41 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       },
     }, Icon(watching ? 'bellOff' : 'eye', 14));
 
+    // Save as template (admins only).
+    const templateBtn = window.state.me?.is_admin ? h('button', {
+      class: 'icon-btn', title: 'Save as template',
+      onClick: async () => {
+        const name = await promptDialog({
+          title: 'Save as template',
+          label: 'Template name',
+          value: task.title || '',
+          placeholder: 'e.g. Bug triage checklist',
+        });
+        if (name == null) return;
+        const trimmed = name.trim();
+        if (!trimmed) { toast('Template name is required', 'error'); return; }
+        try {
+          await API.createTemplate({
+            project_id: task.project,
+            name: trimmed,
+            title: task.title,
+            description: task.description,
+            priority: task.priority,
+            estimate: task.estimate,
+            default_status: task.status,
+            labels: task.labels || [],
+            assignees: task.assignees || [],
+            subtasks: (task.subtasks || []).map(s => s.text),
+          });
+          toast('Template saved', 'success');
+          if (window.pmLoadTemplates) window.pmLoadTemplates();
+        } catch (e) { toast('Could not save template: ' + e.message, 'error'); }
+      },
+    }, Icon('archive', 14)) : null;
+
     head.appendChild(h('div', { style: { marginLeft: 'auto' }, class: 'hstack' },
       watchBtn,
+      templateBtn,
       h('button', { class: 'icon-btn', title: 'Copy link',
         onClick: () => { navigator.clipboard?.writeText(`${location.origin}${location.pathname}#task=${task.id}`); toast('Link copied'); } },
         Icon('link', 14)),
@@ -580,6 +625,88 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
       ));
       return tsec;
+    })());
+
+    // Reminders
+    body.appendChild((() => {
+      const rsec = h('div', { style: { marginTop: '24px' } });
+      rsec.appendChild(sectionLabel(
+        'Reminders',
+        h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-2)' } },
+          reminders == null ? '…' : String(reminders.length)),
+      ));
+
+      // Format an absolute reminder time (remind_at may be future, so relTime —
+      // which only renders elapsed past times — isn't enough; and parseISO()
+      // truncates to midnight, which would drop the reminder's clock time).
+      const fmtRemind = (iso) => {
+        if (!iso) return '';
+        const d = new Date(String(iso).replace(' ', 'T'));
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' }) +
+          ' ' + d.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });
+      };
+
+      const list = h('div', { style: { display: 'grid', gap: '6px', marginBottom: '10px' } });
+      if (reminders && reminders.length) {
+        for (const rm of reminders) {
+          list.appendChild(h('div', { class: 'time-entry' },
+            Icon('clock', 13),
+            h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, fmtRemind(rm.remind_at)),
+            rm.everyone || rm.channel === 'everyone'
+              ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px' } }, Icon('users', 10), ' Everyone')
+              : null,
+            rm.sent_at
+              ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px', color: 'var(--green-fg)' }, title: 'Sent ' + relTime(rm.sent_at) }, Icon('check', 10), ' Sent')
+              : null,
+            h('span', { style: { flex: 1 } }),
+            h('button', {
+              class: 'icon-btn sm', title: 'Delete reminder',
+              onClick: async () => {
+                const ok = await confirmDialog({ title: 'Delete reminder?', confirmText: 'Delete', danger: true });
+                if (!ok) return;
+                try { await API.deleteReminder(rm.id); await loadReminders(); }
+                catch (e) { toast(e.message, 'error'); }
+              },
+            }, Icon('trash', 11)),
+          ));
+        }
+      } else if (reminders && !reminders.length) {
+        list.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No reminders set.'));
+      }
+      rsec.appendChild(list);
+
+      // Add reminder form.
+      const whenInput = h('input', {
+        type: 'datetime-local', value: newReminderAt,
+        style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+        onInput: e => { newReminderAt = e.target.value; },
+      });
+      const submitReminder = async () => {
+        if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
+        const payload = { remind_at: newReminderAt };
+        if (newReminderEveryone) payload.everyone = '1';
+        try {
+          await API.addReminder(task.id, payload);
+          newReminderAt = ''; newReminderEveryone = false;
+          await loadReminders();
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
+
+      const everyoneId = 'pm-remind-everyone-' + task.id;
+      const everyoneBox = h('input', {
+        type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
+        onChange: e => { newReminderEveryone = e.target.checked; },
+      });
+      rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
+        Icon('clock', 13),
+        whenInput,
+        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitReminder }, 'Remind me'),
+        h('label', { for: everyoneId, class: 'hstack', style: { gap: '5px', fontSize: '12px', color: 'var(--fg-2)', cursor: 'pointer' } },
+          everyoneBox, 'Remind everyone on this task'),
+      ));
+      return rsec;
     })());
 
     // Custom fields

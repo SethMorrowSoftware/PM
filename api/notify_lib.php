@@ -141,6 +141,7 @@ function pm_run_due_sweep(): void {
             $when = ($t['due'] === date('Y-m-d')) ? 'due today' : 'due tomorrow';
             $body = $t['ref'] . ' ' . $t['title'] . ' is ' . $when;
             $assignees = pm_fetch_all('SELECT user_id FROM task_assignees WHERE task_id = ?', [$taskId]);
+            $isNew = false;
             foreach ($assignees as $a) {
                 $uid = (int)$a['user_id'];
                 if ($uid <= 0) continue;
@@ -151,8 +152,18 @@ function pm_run_due_sweep(): void {
                        AND created_at >= CURDATE() LIMIT 1",
                     [$uid, $taskId]
                 );
-                if (!$exists) pm_notify($uid, null, $taskId, 'due_soon', $body);
+                if (!$exists) { pm_notify($uid, null, $taskId, 'due_soon', $body); $isNew = true; }
+            }
+            // Fire due_soon automations at most once per task per day (tied to the
+            // newly-created daily notification, so actions don't repeat every sweep).
+            if ($isNew && function_exists('pm_run_automations')) {
+                try { pm_run_automations('due_soon', $taskId); } catch (Throwable $_) { /* best effort */ }
             }
         }
     } catch (Throwable $_) { /* best effort */ }
 }
+
+// Load the optional automation engine AFTER our helpers are defined, so its
+// require_once of this file is already satisfied (no load-order fatal). Guarded
+// so a partial deploy without the engine can't break notifications.
+if (is_file(__DIR__ . '/automations_lib.php')) require_once __DIR__ . '/automations_lib.php';
