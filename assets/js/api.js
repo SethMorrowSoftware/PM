@@ -158,6 +158,23 @@ const API = {
   taskActivity(taskId)            { return this.get(`tasks.php?id=${taskId}&activity=1`); },
   addReaction(taskId, commentId, emoji)    { return this.post(`tasks.php?id=${taskId}&comments=1&comment_id=${commentId}&reaction=${encodeURIComponent(emoji)}`, {}); },
   removeReaction(taskId, commentId, emoji) { return this.del(`tasks.php?id=${taskId}&comments=1&comment_id=${commentId}&reaction=${encodeURIComponent(emoji)}`); },
+
+  // ---- v2.1: task templates ----
+  listTemplates()                 { return this.get('templates.php'); },
+  createTemplate(data)            { return this.post('templates.php', data); },
+  updateTemplate(id, patch)       { return this.patch(`templates.php?id=${id}`, patch); },
+  deleteTemplate(id)              { return this.del(`templates.php?id=${id}`); },
+
+  // ---- v2.1: automation rules ----
+  listAutomations()               { return this.get('automations.php'); },
+  createAutomation(data)          { return this.post('automations.php', data); },
+  updateAutomation(id, patch)     { return this.patch(`automations.php?id=${id}`, patch); },
+  deleteAutomation(id)            { return this.del(`automations.php?id=${id}`); },
+
+  // ---- v2.1: reminders ----
+  listReminders(taskId)           { return this.get(`reminders.php?task_id=${taskId}`); },
+  addReminder(taskId, data)       { return this.post(`reminders.php?task_id=${taskId}`, data); },
+  deleteReminder(id)              { return this.del(`reminders.php?id=${id}`); },
 };
 
 window.API = API;
