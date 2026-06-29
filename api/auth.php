@@ -20,6 +20,12 @@ switch ($action) {
         $email = strtolower(trim((string)pm_param('email', '')));
         $pass  = (string)pm_param('password', '');
         if ($email === '' || $pass === '') pm_error('Email and password required');
+        // Throttle brute-force / credential-stuffing: per (ip,email) and per ip.
+        $ip = pm_client_ip();
+        if (!pm_rate_limit('login:' . $ip . ':' . $email, 10, 900) ||
+            !pm_rate_limit('loginip:' . $ip, 40, 900)) {
+            pm_error('Too many sign-in attempts. Please wait a few minutes and try again.', 429);
+        }
         $u = pm_fetch_one('SELECT * FROM users WHERE email = ?', [$email]);
         if (!$u || !password_verify($pass, $u['password_hash'])) {
             pm_error('Invalid email or password', 401);
@@ -45,6 +51,10 @@ switch ($action) {
         $isAdmin = $me && !empty($me['is_admin']);
         if (!$isAdmin && empty($cfg['allow_public_register'])) {
             pm_error('Registration is disabled. Ask an admin to create your account.', 403);
+        }
+        // Throttle self-serve signups (admins creating accounts are exempt).
+        if (!$isAdmin && !pm_rate_limit('register:' . pm_client_ip(), 8, 3600)) {
+            pm_error('Too many sign-up attempts. Please try again later.', 429);
         }
         $email = strtolower(trim((string)pm_param('email', '')));
         $pass  = (string)pm_param('password', '');

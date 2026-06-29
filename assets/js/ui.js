@@ -364,6 +364,490 @@ function toast(msg, kind = 'info', ms = 3200) {
   setTimeout(() => t.remove(), ms);
 }
 
+// -------- relTime / fmtMinutes --------
+// relTime moved here from views/dashboard.js so every view shares one impl.
+// Server timestamps are UTC "YYYY-MM-DD HH:MM:SS"; treat them as UTC by
+// swapping the space for 'T' and appending 'Z' before constructing the Date.
+function relTime(iso) {
+  if (!iso) return '';
+  const then = new Date(String(iso).replace(' ', 'T') + 'Z');
+  if (isNaN(then.getTime())) return '';
+  const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+  if (secs < 60) return 'now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+  if (secs < 604800) return Math.floor(secs / 86400) + 'd';
+  return then.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+}
+
+// 90 -> "1h 30m"; 45 -> "45m"; 0 -> "0m"
+function fmtMinutes(min) {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  if (m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+// -------- Generic accessible modal --------
+// modal({title, body, footer, width}) -> { el, close }
+// `body`/`footer` may be a Node, an array of Nodes, a string, or a function
+// returning any of those. Implements role="dialog" + aria-modal, Esc=close,
+// click-scrim=close, a focus trap over Tab/Shift+Tab, and restores focus to
+// whatever was focused before the modal opened.
+function modal({ title = '', body = null, footer = null, width = null } = {}) {
+  const prevFocus = document.activeElement;
+  const frag = document.createDocumentFragment();
+  const scrim = h('div', { class: 'scrim' });
+  const dialog = h('div', {
+    class: 'modal dialog', role: 'dialog', 'aria-modal': 'true', tabindex: '-1',
+    style: width ? { width: typeof width === 'number' ? width + 'px' : width } : undefined,
+  });
+  frag.appendChild(scrim);
+  frag.appendChild(dialog);
+
+  let closed = false;
+  function close() {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey, true);
+    scrim.remove();
+    dialog.remove();
+    if (prevFocus && typeof prevFocus.focus === 'function') {
+      try { prevFocus.focus(); } catch (_) {}
+    }
+  }
+
+  function resolveContent(c) {
+    if (typeof c === 'function') c = c();
+    if (c == null) return [];
+    return Array.isArray(c) ? c : [c];
+  }
+
+  if (title != null && title !== '') {
+    const head = h('div', { class: 'modal-head' });
+    const titleId = 'dlg-title-' + (++_popoverCounter);
+    head.appendChild(h('div', { class: 'modal-title-input', id: titleId, style: { fontSize: '17px', fontWeight: '500' } }, title));
+    dialog.setAttribute('aria-labelledby', titleId);
+    dialog.appendChild(head);
+  }
+  const bodyEl = h('div', { class: 'modal-body', style: { display: 'block' } });
+  appendChildren(bodyEl, resolveContent(body));
+  dialog.appendChild(bodyEl);
+
+  if (footer != null) {
+    const footEl = h('div', { class: 'modal-foot' });
+    appendChildren(footEl, resolveContent(footer));
+    dialog.appendChild(footEl);
+  }
+
+  const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function focusables() {
+    return [...dialog.querySelectorAll(FOCUSABLE)].filter(el => el.offsetParent !== null || el === document.activeElement);
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key !== 'Tab') return;
+    const items = focusables();
+    if (!items.length) { e.preventDefault(); dialog.focus(); return; }
+    const first = items[0], last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !dialog.contains(active)) { e.preventDefault(); last.focus(); }
+    } else {
+      if (active === last || !dialog.contains(active)) { e.preventDefault(); first.focus(); }
+    }
+  }
+
+  scrim.addEventListener('mousedown', close);
+  document.addEventListener('keydown', onKey, true);
+  document.body.appendChild(frag);
+
+  // Focus the first focusable atom (fall back to the dialog itself).
+  setTimeout(() => {
+    const items = focusables();
+    (items[0] || dialog).focus();
+  }, 0);
+
+  return { el: dialog, close };
+}
+
+// confirmDialog({title, message, confirmText, cancelText, danger}) -> Promise<bool>
+function confirmDialog({ title = 'Are you sure?', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (val) => { if (done) return; done = true; m.close(); resolve(val); };
+    const cancelBtn = h('button', { class: 'btn btn-ghost', onClick: () => finish(false) }, cancelText);
+    const okBtn = h('button', { class: 'btn ' + (danger ? 'btn-danger' : 'btn-primary'), onClick: () => finish(true) }, confirmText);
+    const m = modal({
+      title,
+      body: message ? h('div', { style: { fontSize: '13.5px', color: 'var(--fg-1)', lineHeight: '1.5' } }, message) : null,
+      footer: h('div', { class: 'hstack', style: { marginLeft: 'auto', gap: '8px' } }, cancelBtn, okBtn),
+    });
+    // Esc / scrim resolve false too: wrap the modal's close.
+    const origClose = m.close;
+    m.close = () => { origClose(); if (!done) { done = true; resolve(false); } };
+    m.el.addEventListener('keydown', e => { if (e.key === 'Enter' && document.activeElement !== cancelBtn) { e.preventDefault(); finish(true); } });
+    setTimeout(() => okBtn.focus(), 0);
+  });
+}
+
+// promptDialog({title, label, value, placeholder, multiline}) -> Promise<string|null>
+function promptDialog({ title = 'Enter a value', label = '', value = '', placeholder = '', multiline = false } = {}) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (val) => { if (done) return; done = true; m.close(); resolve(val); };
+    const field = multiline
+      ? h('textarea', { class: 'input', rows: 4, placeholder, style: { width: '100%', resize: 'vertical' } })
+      : h('input', { class: 'input', type: 'text', placeholder, value, style: { width: '100%' } });
+    if (multiline) field.value = value || '';
+    if (!multiline) {
+      field.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); finish(field.value); } });
+    } else {
+      field.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(field.value); } });
+    }
+    const bodyKids = [];
+    if (label) bodyKids.push(h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, label));
+    bodyKids.push(field);
+    const cancelBtn = h('button', { class: 'btn btn-ghost', onClick: () => finish(null) }, 'Cancel');
+    const okBtn = h('button', { class: 'btn btn-primary', onClick: () => finish(field.value) }, 'Save');
+    const m = modal({
+      title,
+      body: bodyKids,
+      footer: h('div', { class: 'hstack', style: { marginLeft: 'auto', gap: '8px' } }, cancelBtn, okBtn),
+    });
+    const origClose = m.close;
+    m.close = () => { origClose(); if (!done) { done = true; resolve(null); } };
+    setTimeout(() => { field.focus(); if (!multiline) field.select && field.select(); }, 0);
+  });
+}
+
+// -------- Date picker popover --------
+// datePickerPopover(anchor, value, onPick): small month grid in a popover.
+// `value` is a YYYY-MM-DD string (or falsy). onPick receives a YYYY-MM-DD
+// string, or '' when the user clicks "Clear".
+function datePickerPopover(anchor, value, onPick) {
+  const selected = value ? parseISO(value) : null;
+  let cursor = selected ? new Date(selected.getFullYear(), selected.getMonth(), 1)
+                        : (() => { const t = today(); return new Date(t.getFullYear(), t.getMonth(), 1); })();
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const DOW = ['S','M','T','W','T','F','S'];
+
+  return openPopover(anchor, ({ close }) => {
+    const wrap = h('div', { class: 'datepicker', style: { padding: '8px', width: '236px' } });
+
+    function render() {
+      wrap.replaceChildren();
+      const header = h('div', { class: 'hstack', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
+        h('button', { class: 'btn btn-ghost', style: { padding: '4px' }, 'aria-label': 'Previous month',
+          onClick: () => { cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1); render(); } }, Icon('chevronLeft', 16)),
+        h('div', { style: { fontSize: '13px', fontWeight: '600' } }, `${MONTHS[cursor.getMonth()]} ${cursor.getFullYear()}`),
+        h('button', { class: 'btn btn-ghost', style: { padding: '4px' }, 'aria-label': 'Next month',
+          onClick: () => { cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); render(); } }, Icon('chevronRight', 16)),
+      );
+      wrap.appendChild(header);
+
+      const grid = h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '2px' } });
+      for (const d of DOW) grid.appendChild(h('div', { style: { textAlign: 'center', fontSize: '10px', color: 'var(--fg-3)', padding: '2px 0' } }, d));
+
+      const firstDow = new Date(cursor.getFullYear(), cursor.getMonth(), 1).getDay();
+      const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+      const todayStr = ymd(today());
+      for (let i = 0; i < firstDow; i++) grid.appendChild(h('div'));
+      for (let day = 1; day <= daysInMonth; day++) {
+        const cellDate = new Date(cursor.getFullYear(), cursor.getMonth(), day);
+        const cellStr = ymd(cellDate);
+        const isSel = value && cellStr === value;
+        const isToday = cellStr === todayStr;
+        grid.appendChild(h('button', {
+          class: 'btn btn-ghost dp-day' + (isSel ? ' selected' : ''),
+          style: {
+            padding: '0', height: '28px', fontSize: '12px', borderRadius: '6px',
+            background: isSel ? 'var(--acc-1)' : undefined,
+            color: isSel ? '#fff' : undefined,
+            border: !isSel && isToday ? '1px solid var(--acc-border)' : undefined,
+          },
+          onClick: () => { onPick(cellStr); close(); },
+        }, String(day)));
+      }
+      wrap.appendChild(grid);
+
+      wrap.appendChild(h('div', { class: 'hstack', style: { justifyContent: 'space-between', marginTop: '8px' } },
+        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: () => { onPick(''); close(); } }, 'Clear'),
+        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: () => { onPick(todayStr); close(); } }, 'Today'),
+      ));
+    }
+    render();
+    return wrap;
+  });
+}
+
+// -------- @-mention textarea --------
+// mentionTextarea({value, onInput, onSubmit, placeholder, rows}) -> wrapper el
+// containing a <textarea> with an @-autocomplete dropdown that matches
+// window.state.users by name. Selecting a user inserts "@Full Name " at the
+// caret. Enter (without Shift) calls onSubmit(currentValue); typing calls
+// onInput(value). The returned wrapper is focusable (focuses the textarea).
+function mentionTextarea({ value = '', onInput, onSubmit, placeholder = '', rows = 3 } = {}) {
+  const wrap = h('div', { class: 'mention-wrap', style: { position: 'relative' } });
+  const ta = h('textarea', {
+    class: 'input mention-input', rows, placeholder,
+    style: { width: '100%', resize: 'vertical' },
+  });
+  ta.value = value || '';
+  const menu = h('div', { class: 'popover mention-menu', style: { display: 'none', position: 'absolute', left: '0', right: '0', top: '100%', zIndex: '80', maxHeight: '200px', overflowY: 'auto' } });
+
+  let matches = [];
+  let activeIdx = 0;
+  let tokenStart = -1; // index of the '@' currently being completed
+
+  function findToken() {
+    const pos = ta.selectionStart;
+    const upto = ta.value.slice(0, pos);
+    const at = upto.lastIndexOf('@');
+    if (at < 0) return null;
+    // Must be at start or preceded by whitespace; query has no whitespace.
+    if (at > 0 && !/\s/.test(upto[at - 1])) return null;
+    const query = upto.slice(at + 1);
+    if (/\s/.test(query)) return null;
+    return { at, query };
+  }
+
+  function closeMenu() { menu.style.display = 'none'; matches = []; tokenStart = -1; }
+
+  function renderMenu() {
+    menu.replaceChildren();
+    if (!matches.length) { closeMenu(); return; }
+    matches.forEach((u, i) => {
+      menu.appendChild(h('div', {
+        class: 'pop-item mention-item' + (i === activeIdx ? ' selected' : ''),
+        onMousedown: e => { e.preventDefault(); pick(u); },
+      }, Avatar(u, 20), h('span', { style: { marginLeft: '8px' } }, u.name)));
+    });
+    menu.style.display = 'block';
+  }
+
+  function updateMenu() {
+    const tok = findToken();
+    if (!tok) { closeMenu(); return; }
+    const users = (S().users || []);
+    const q = tok.query.toLowerCase();
+    matches = users.filter(u => u.name.toLowerCase().includes(q)).slice(0, 8);
+    tokenStart = tok.at;
+    activeIdx = 0;
+    renderMenu();
+  }
+
+  function pick(u) {
+    if (tokenStart < 0) return;
+    const pos = ta.selectionStart;
+    const before = ta.value.slice(0, tokenStart);
+    const after = ta.value.slice(pos);
+    const insert = '@' + u.name + ' ';
+    ta.value = before + insert + after;
+    const caret = (before + insert).length;
+    ta.focus();
+    ta.setSelectionRange(caret, caret);
+    closeMenu();
+    if (typeof onInput === 'function') onInput(ta.value);
+  }
+
+  ta.addEventListener('input', () => {
+    if (typeof onInput === 'function') onInput(ta.value);
+    updateMenu();
+  });
+  ta.addEventListener('keyup', e => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMenu();
+  });
+  ta.addEventListener('keydown', e => {
+    const open = menu.style.display !== 'none' && matches.length;
+    if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      activeIdx = (activeIdx + (e.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+      renderMenu();
+      return;
+    }
+    if (open && (e.key === 'Enter' || e.key === 'Tab')) {
+      e.preventDefault();
+      pick(matches[activeIdx]);
+      return;
+    }
+    if (open && e.key === 'Escape') { e.preventDefault(); closeMenu(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (typeof onSubmit === 'function') onSubmit(ta.value);
+    }
+  });
+  ta.addEventListener('blur', () => setTimeout(closeMenu, 120));
+
+  wrap.appendChild(ta);
+  wrap.appendChild(menu);
+  // Make the wrapper itself behave like the field for callers that .focus() it.
+  wrap.focus = () => ta.focus();
+  wrap.getValue = () => ta.value;
+  wrap.setValue = (v) => { ta.value = v || ''; };
+  wrap._textarea = ta;
+  return wrap;
+}
+
+// -------- Pointer-based drag helper (mouse + touch) --------
+// makeDraggable(el, {onStart, onMove, onDrop, handle, data}) -> cleanup fn.
+// Uses Pointer Events so it works on touch and mouse alike (NOT HTML5 DnD).
+// A small movement threshold avoids hijacking taps/clicks. While dragging,
+// document.body gets the 'dragging' class. Callbacks receive the pointer
+// event (which carries clientX/clientY); `data` is attached to each event as
+// `e.dragData` for convenience.
+function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null, threshold = 5 } = {}) {
+  const grip = handle ? (typeof handle === 'string' ? el.querySelector(handle) : handle) : el;
+  if (!grip) return () => {};
+
+  let startX = 0, startY = 0, active = false, started = false, pointerId = null;
+
+  function decorate(e) { try { e.dragData = data; } catch (_) {} return e; }
+
+  function onPointerDown(e) {
+    // Primary button / touch / pen only; ignore right-click.
+    if (e.button != null && e.button !== 0) return;
+    active = true; started = false; pointerId = e.pointerId;
+    startX = e.clientX; startY = e.clientY;
+    document.addEventListener('pointermove', onPointerMove, true);
+    document.addEventListener('pointerup', onPointerUp, true);
+    document.addEventListener('pointercancel', onPointerUp, true);
+  }
+
+  function onPointerMove(e) {
+    if (!active || (pointerId != null && e.pointerId !== pointerId)) return;
+    if (!started) {
+      if (Math.abs(e.clientX - startX) < threshold && Math.abs(e.clientY - startY) < threshold) return;
+      started = true;
+      document.body.classList.add('dragging');
+      // Capture so we keep getting moves even over other elements.
+      try { grip.setPointerCapture(pointerId); } catch (_) {}
+      if (typeof onStart === 'function') onStart(decorate(e));
+    }
+    e.preventDefault();
+    if (typeof onMove === 'function') onMove(decorate(e));
+  }
+
+  function onPointerUp(e) {
+    if (pointerId != null && e.pointerId !== pointerId) return;
+    cleanupMove();
+    if (started) {
+      document.body.classList.remove('dragging');
+      try { grip.releasePointerCapture(pointerId); } catch (_) {}
+      if (typeof onDrop === 'function') onDrop(decorate(e));
+    }
+    active = false; started = false; pointerId = null;
+  }
+
+  function cleanupMove() {
+    document.removeEventListener('pointermove', onPointerMove, true);
+    document.removeEventListener('pointerup', onPointerUp, true);
+    document.removeEventListener('pointercancel', onPointerUp, true);
+  }
+
+  grip.addEventListener('pointerdown', onPointerDown);
+  grip.style.touchAction = 'none'; // prevent scroll-stealing on touch while dragging
+
+  return function cleanup() {
+    grip.removeEventListener('pointerdown', onPointerDown);
+    cleanupMove();
+    document.body.classList.remove('dragging');
+  };
+}
+
+// Convenience wrapper over makeDraggable for a simple reorderable list. Returns
+// a cleanup fn that tears down every item's drag handler.
+function sortableList(container, { itemSelector = '[data-id]', onReorder, handle = null } = {}) {
+  const cleanups = [];
+  const items = [...container.querySelectorAll(itemSelector)];
+  items.forEach(item => {
+    let placeholderIndex = null;
+    const c = makeDraggable(item, {
+      handle,
+      data: { id: item.dataset.id },
+      onStart: () => { item.classList.add('drag-ghost'); },
+      onMove: (e) => {
+        const over = document.elementFromPoint(e.clientX, e.clientY);
+        const overItem = over && over.closest ? over.closest(itemSelector) : null;
+        if (overItem && overItem !== item && container.contains(overItem)) {
+          const rect = overItem.getBoundingClientRect();
+          const after = e.clientY > rect.top + rect.height / 2;
+          container.insertBefore(item, after ? overItem.nextSibling : overItem);
+        }
+      },
+      onDrop: () => {
+        item.classList.remove('drag-ghost');
+        const order = [...container.querySelectorAll(itemSelector)].map(n => n.dataset.id);
+        if (typeof onReorder === 'function') onReorder(item.dataset.id, order);
+      },
+    });
+    cleanups.push(c);
+  });
+  return () => cleanups.forEach(fn => fn());
+}
+
+// -------- Emoji reaction bar --------
+// emojiReactionBar(reactions, onToggle): a row of .reaction chips plus a small
+// add-reaction button that opens a tiny emoji popover. `reactions` is an array
+// of {emoji, count, mine}. onToggle(emoji) is called for a chip click or a
+// popover pick.
+const REACTION_EMOJIS = ['👍', '❤️', '🎉', '✅', '👀', '🙏'];
+function emojiReactionBar(reactions = [], onToggle) {
+  const row = h('div', { class: 'reaction-bar hstack', style: { gap: '4px', flexWrap: 'wrap', alignItems: 'center' } });
+  for (const r of reactions) {
+    if (!r || !r.count) continue;
+    row.appendChild(h('button', {
+      class: 'reaction' + (r.mine ? ' mine' : ''),
+      type: 'button',
+      onClick: () => { if (typeof onToggle === 'function') onToggle(r.emoji); },
+    }, h('span', null, r.emoji), h('span', { class: 'reaction-count' }, String(r.count))));
+  }
+  const addBtn = h('button', { class: 'reaction reaction-add', type: 'button', 'aria-label': 'Add reaction' },
+    Icon('smile', 14));
+  addBtn.addEventListener('click', () => {
+    openPopover(addBtn, ({ close }) => {
+      const grid = h('div', { class: 'emoji-grid', style: { display: 'flex', gap: '4px', padding: '6px' } });
+      for (const e of REACTION_EMOJIS) {
+        grid.appendChild(h('button', {
+          class: 'btn btn-ghost emoji-pick', type: 'button', style: { fontSize: '18px', padding: '4px 6px' },
+          onClick: () => { if (typeof onToggle === 'function') onToggle(e); close(); },
+        }, e));
+      }
+      return grid;
+    });
+  });
+  row.appendChild(addBtn);
+  return row;
+}
+
+// -------- Theme toggle --------
+// ThemeToggle(onToggle): a button rendering Icon('sun') when the current theme
+// is dark (click -> go light) or Icon('moon') when light. onClick calls
+// onToggle().
+function ThemeToggle(onToggle) {
+  const isLight = S() && S().theme === 'light';
+  const btn = h('button', {
+    class: 'btn btn-ghost theme-toggle', type: 'button',
+    'aria-label': isLight ? 'Switch to dark theme' : 'Switch to light theme',
+    title: isLight ? 'Dark mode' : 'Light mode',
+    onClick: () => { if (typeof onToggle === 'function') onToggle(); },
+  }, Icon(isLight ? 'moon' : 'sun', 18));
+  return btn;
+}
+
+// -------- Mini task chip (dependency lists) --------
+// miniTaskChip(task): compact chip with a status dot, mono ref, and title.
+function miniTaskChip(task) {
+  if (!task) return document.createComment('no-task');
+  const s = statusById(task.status);
+  return h('span', { class: 'mini-task-chip', title: task.title || '' },
+    h('span', { class: 'mini-task-dot', style: { width: '7px', height: '7px', borderRadius: '50%', background: (s && s.color) || 'var(--fg-3)', display: 'inline-block' } }),
+    task.ref ? h('span', { class: 'mono', style: { color: 'var(--fg-3)', fontSize: '11.5px' } }, task.ref) : null,
+    h('span', { class: 'mini-task-title', style: { fontSize: '12.5px', color: 'var(--fg-1)' } }, task.title || ''),
+  );
+}
+
 window.h = h;
 window.mount = mount;
 window.STATUSES = STATUSES;
@@ -391,3 +875,15 @@ window.priorityPickerContent = priorityPickerContent;
 window.projectPickerContent = projectPickerContent;
 window.toast = toast;
 window.PRIO_LABELS = PRIO_LABELS;
+window.relTime = relTime;
+window.fmtMinutes = fmtMinutes;
+window.modal = modal;
+window.confirmDialog = confirmDialog;
+window.promptDialog = promptDialog;
+window.datePickerPopover = datePickerPopover;
+window.mentionTextarea = mentionTextarea;
+window.makeDraggable = makeDraggable;
+window.sortableList = sortableList;
+window.emojiReactionBar = emojiReactionBar;
+window.ThemeToggle = ThemeToggle;
+window.miniTaskChip = miniTaskChip;

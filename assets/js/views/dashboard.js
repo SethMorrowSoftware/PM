@@ -1,4 +1,15 @@
 // Dashboard view.
+//
+// Metrics philosophy: trend arrows show REAL this-week-vs-last-week deltas, not
+// decoration. Where a metric has no honest historical signal we omit the arrow
+// (pass trend=null) rather than fake a direction. Server timestamps are UTC
+// "YYYY-MM-DD HH:MM:SS"; localDate() converts one to a local YYYY-MM-DD so the
+// bucketing matches the user's wall clock (consistent with ui.js date helpers).
+//
+// NOTE: there is no `done_at`/`completed_at` column, so "completed" timing is
+// approximated by `updated_at` of tasks whose status is currently `done`. That's
+// the most honest signal available without a schema change; re-opening a task
+// would drop it from the completed series, which is acceptable for a dashboard.
 function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   const t = today();
   const overdue    = tasks.filter(x => x.status !== 'done' && x.due && parseISO(x.due) < t);
@@ -6,11 +17,64 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   const inProgress = tasks.filter(x => x.status === 'in_progress');
   const completed  = tasks.filter(x => x.status === 'done');
   const me = window.state.me;
+  const myName = (me.name || '').split(' ')[0] || 'there';
   const myTasks = tasks.filter(x => x.assignees.includes(me.id) && x.status !== 'done');
 
   const byStatus = STATUSES.map(s => ({ ...s, count: tasks.filter(x => x.status === s.id).length }));
   const total = tasks.length;
   const completionPct = total ? Math.round((completed.length / total) * 100) : 0;
+
+  // ---- honest week-over-week deltas ------------------------------------------
+  // Convert a UTC server timestamp to a local YYYY-MM-DD date key.
+  const localDate = (iso) => {
+    if (!iso) return null;
+    const d = new Date(String(iso).replace(' ', 'T') + 'Z');
+    if (isNaN(d.getTime())) return null;
+    return ymd(d); // local wall-clock date
+  };
+  // Date keys for [today-13 .. today], oldest first.
+  const dayKeys = [];
+  for (let i = 13; i >= 0; i--) dayKeys.push(daysFromNow(-i));
+  const startThisWeek = daysFromNow(-6); // inclusive 7-day window ending today
+  const startLastWeek = daysFromNow(-13);
+  const endLastWeek   = daysFromNow(-7);
+
+  // Per-day created / completed counts over the 14-day window.
+  const createdByDay   = Object.fromEntries(dayKeys.map(k => [k, 0]));
+  const completedByDay = Object.fromEntries(dayKeys.map(k => [k, 0]));
+  for (const x of tasks) {
+    const ck = localDate(x.created_at);
+    if (ck != null && ck in createdByDay) createdByDay[ck]++;
+    if (x.status === 'done') {
+      const dk = localDate(x.updated_at);
+      if (dk != null && dk in completedByDay) completedByDay[dk]++;
+    }
+  }
+  const sumRange = (map, fromKey, toKeyExclusive) =>
+    dayKeys.reduce((n, k) => n + ((k >= fromKey && k < toKeyExclusive) ? map[k] : 0), 0);
+  // this-week window is [startThisWeek .. today] inclusive -> exclusive bound = tomorrow
+  const tomorrow = daysFromNow(1);
+  const createdThis   = sumRange(createdByDay,   startThisWeek, tomorrow);
+  const createdLast   = sumRange(createdByDay,   startLastWeek, endLastWeek);
+  const completedThis = sumRange(completedByDay, startThisWeek, tomorrow);
+  const completedLast = sumRange(completedByDay, startLastWeek, endLastWeek);
+
+  // trend(delta, higherIsBetter): returns {dir:'up'|'down'|'flat', good:bool}.
+  const trendFor = (cur, prev, higherIsBetter = true) => {
+    const delta = cur - prev;
+    if (delta === 0) return { dir: 'flat', good: true, delta };
+    const dir = delta > 0 ? 'up' : 'down';
+    const good = higherIsBetter ? delta > 0 : delta < 0;
+    return { dir, good, delta };
+  };
+  const fmtDelta = (d) => (d > 0 ? '+' : '') + d;
+
+  // Open-tasks trend = created-minus-completed this week vs last (fewer net new
+  // open tasks is better, so higherIsBetter=false).
+  const openNetThis = createdThis - completedThis;
+  const openNetLast = createdLast - completedLast;
+  const openTrend = trendFor(openNetThis, openNetLast, false);
+  const completedTrend = trendFor(completedThis, completedLast, true);
 
   const workload = window.state.users
     .filter(u => u.id !== me.id)
@@ -19,15 +83,16 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   const maxWork = Math.max(...workload.map(w => w.open), 1);
 
   const projects = window.state.projects;
+  const milestones = (window.state.milestones || []);
 
-  const root = h('div', { style: { padding: '24px', display: 'grid', gap: '20px', gridTemplateColumns: 'repeat(12, 1fr)' } });
+  const root = h('div', { class: 'dash-grid', style: { padding: '24px', display: 'grid', gap: '20px' } });
 
   // Greeting
   root.appendChild(h('div', { style: { gridColumn: 'span 12', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '20px' } },
     h('div', null,
       h('div', { style: { fontSize: '12px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '6px' } },
         t.toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })),
-      h('h1', { style: { margin: 0, fontSize: '26px', fontWeight: '700', letterSpacing: '-0.02em' } }, `Good day, ${me.name.split(' ')[0]}.`),
+      h('h1', { style: { margin: 0, fontSize: '26px', fontWeight: '700', letterSpacing: '-0.02em' } }, `Good day, ${myName}.`),
       h('p', { style: { margin: '6px 0 0', color: 'var(--fg-2)', fontSize: '14px' } },
         `${dueToday.length} due today, ${overdue.length} overdue, ${inProgress.length} in progress.`),
     ),
@@ -36,11 +101,20 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
     ),
   ));
 
-  // Stat cards
-  root.appendChild(StatCard('Open tasks',      total - completed.length,     inProgress.length + ' in progress', 'up',   'blue',   'checkSquare'));
-  root.appendChild(StatCard('Due today',       dueToday.length,              overdue.length > 0 ? `${overdue.length} overdue` : 'on track', overdue.length ? 'down' : 'flat', 'amber', 'clock'));
-  root.appendChild(StatCard('In progress',     inProgress.length,            `${new Set(inProgress.flatMap(x => x.assignees)).size} people active`, 'flat', 'violet', 'activity'));
-  root.appendChild(StatCard('Completion rate', `${completionPct}%`,          `${completed.length} done`, 'up', 'green', 'trendUp'));
+  // Stat cards. Trend is {dir,good,delta} | null. null => no arrow (honest:
+  // these two metrics have no week-over-week signal worth showing).
+  root.appendChild(StatCard('Open tasks',      total - completed.length,
+    openTrend.dir === 'flat' ? 'no change wk/wk' : `${fmtDelta(openNetThis - openNetLast)} net wk/wk`,
+    openTrend, 'blue', 'checkSquare'));
+  root.appendChild(StatCard('Due today',       dueToday.length,
+    overdue.length > 0 ? `${overdue.length} overdue` : 'on track',
+    null, 'amber', 'clock'));
+  root.appendChild(StatCard('In progress',     inProgress.length,
+    `${new Set(inProgress.flatMap(x => x.assignees)).size} people active`,
+    null, 'violet', 'activity'));
+  root.appendChild(StatCard('Completed (7d)',  completedThis,
+    completedTrend.dir === 'flat' ? `${completionPct}% done overall` : `${fmtDelta(completedTrend.delta)} vs last week`,
+    completedTrend, 'green', 'trendUp'));
 
   // Focus / my tasks
   const focusCard = Card({ gridColumn: 'span 7' });
@@ -78,6 +152,24 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   sbBody.appendChild(sbList);
   sbCard.appendChild(sbBody);
   root.appendChild(sbCard);
+
+  // Throughput chart: 14-day created vs completed (inline SVG, themed).
+  const chartCard = Card({ gridColumn: 'span 7' });
+  chartCard.appendChild(CardHeader('Throughput', 'Created vs completed, last 14 days',
+    h('div', { class: 'hstack', style: { gap: '12px', fontSize: '11px', color: 'var(--fg-3)' } },
+      LegendDot('var(--acc-1)', 'Created'),
+      LegendDot('#22C55E', 'Completed'))));
+  chartCard.appendChild(ThroughputChart(dayKeys, createdByDay, completedByDay));
+  root.appendChild(chartCard);
+
+  // Time logged chart: per-project totals (per-day isn't derivable from the
+  // task payload — time_logged is a per-task SUM with no entry dates — so we
+  // show project breakdown + an overall total via fmtMinutes, per contract).
+  const timeCard = Card({ gridColumn: 'span 5' });
+  const totalLogged = tasks.reduce((n, x) => n + (Number(x.time_logged) || 0), 0);
+  timeCard.appendChild(CardHeader('Time logged', `${fmtMinutes(totalLogged)} across all tasks`));
+  timeCard.appendChild(TimeLoggedChart(tasks, projects));
+  root.appendChild(timeCard);
 
   // Team workload
   const wlCard = Card({ gridColumn: 'span 5' });
@@ -137,8 +229,47 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   pCard.appendChild(pBody);
   root.appendChild(pCard);
 
+  // Milestone progress
+  const msCard = Card({ gridColumn: 'span 5' });
+  msCard.appendChild(CardHeader('Milestones', `${milestones.filter(m => m.status !== 'done').length} open`));
+  const msBody = h('div', { style: { padding: '0 16px 16px', display: 'grid', gap: '12px' } });
+  if (!milestones.length) {
+    msBody.appendChild(h('div', { class: 'empty', style: { padding: '16px' } }, 'No milestones yet.'));
+  }
+  // Open milestones first, then by due date; cap the list.
+  const msSorted = milestones.slice().sort((a, b) => {
+    const ad = a.status === 'done' ? 1 : 0, bd = b.status === 'done' ? 1 : 0;
+    if (ad !== bd) return ad - bd;
+    return String(a.due || '9999').localeCompare(String(b.due || '9999'));
+  });
+  for (const m of msSorted.slice(0, 6)) {
+    const tc = m.task_count || 0;
+    const dc = m.done_count || 0;
+    const pct = tc ? Math.round((dc / tc) * 100) : (m.status === 'done' ? 100 : 0);
+    const proj = projectById(m.project_id);
+    msBody.appendChild(h('div', { class: 'milestone-row' },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' } },
+        Icon('target', 13),
+        h('span', { style: { fontSize: '12.5px', fontWeight: '600', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.name),
+        proj ? h('span', { style: { fontSize: '10.5px', color: proj.color } }, proj.name) : null,
+        m.due ? DueDate(m.due, true) : null,
+      ),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+        h('div', { style: { flex: 1, height: '6px', background: 'var(--bg-3)', borderRadius: '3px', overflow: 'hidden' } },
+          h('div', { style: {
+            width: pct + '%', height: '100%',
+            background: m.status === 'done' ? '#22C55E' : 'var(--acc-1)',
+            borderRadius: '3px', transition: 'width 0.5s'
+          } })),
+        h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)', width: '54px', textAlign: 'right' } }, `${dc}/${tc}`),
+      ),
+    ));
+  }
+  msCard.appendChild(msBody);
+  root.appendChild(msCard);
+
   // Activity
-  const aCard = Card({ gridColumn: 'span 5' });
+  const aCard = Card({ gridColumn: 'span 7' });
   aCard.appendChild(CardHeader('Recent activity'));
   const aBody = h('div', { style: { padding: '0 16px 16px', display: 'grid', gap: '10px' } });
   const items = (activity || []).slice(0, 8);
@@ -178,6 +309,16 @@ function CardHeader(title, subtitle, action) {
   return wrap;
 }
 
+function LegendDot(color, label) {
+  return h('span', { class: 'hstack', style: { gap: '5px', alignItems: 'center' } },
+    h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: color } }),
+    label);
+}
+
+// StatCard. `trend` is null (no arrow) or {dir:'up'|'down'|'flat', good:bool}.
+// Color follows whether the change is GOOD (green) or BAD (red), not the raw
+// direction — so e.g. "fewer net-new open tasks" reads green even though it's a
+// down arrow. `flat` and `null` stay neutral.
 function StatCard(label, value, delta, trend, tone, icon) {
   const tones = {
     blue:   { bg: 'rgba(59,130,246,0.08)', border: 'rgba(59,130,246,0.2)', fg: '#60A5FA' },
@@ -185,6 +326,10 @@ function StatCard(label, value, delta, trend, tone, icon) {
     violet: { bg: 'rgba(168,85,247,0.08)', border: 'rgba(168,85,247,0.2)', fg: '#D8B4FE' },
     green:  { bg: 'rgba(34,197,94,0.08)',  border: 'rgba(34,197,94,0.2)',  fg: '#86EFAC' },
   }[tone];
+  const dir = trend && trend.dir;
+  const deltaColor = !trend || dir === 'flat'
+    ? 'var(--fg-3)'
+    : (trend.good ? '#86EFAC' : '#FCA5A5');
   return h('div', {
     style: {
       gridColumn: 'span 3', background: 'var(--bg-2)', border: '1px solid var(--line)',
@@ -202,16 +347,105 @@ function StatCard(label, value, delta, trend, tone, icon) {
     h('div', { style: { fontSize: '12px', color: 'var(--fg-3)', fontWeight: '600', letterSpacing: '0.02em' } }, label),
     h('div', { style: { fontSize: '30px', fontWeight: '700', letterSpacing: '-0.02em', marginTop: '4px' } }, String(value)),
     h('div', {
-      style: {
-        fontSize: '11.5px',
-        color: trend === 'up' ? '#86EFAC' : trend === 'down' ? '#FCA5A5' : 'var(--fg-3)',
-        marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px'
-      }
+      style: { fontSize: '11.5px', color: deltaColor, marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px' }
     },
-      trend === 'up'   ? Icon('trendUp', 11)   : null,
-      trend === 'down' ? Icon('trendDown', 11) : null,
+      dir === 'up'   ? Icon('trendUp', 11)   : null,
+      dir === 'down' ? Icon('trendDown', 11) : null,
       delta),
   );
+}
+
+// 14-day grouped bar chart (inline SVG). Two series share each day slot.
+// Colors are passed via fill so they track the theme's accent / status green.
+function ThroughputChart(dayKeys, createdByDay, completedByDay) {
+  const W = 560, H = 150, padL = 8, padR = 8, padT = 10, padB = 22;
+  const n = dayKeys.length;
+  const max = Math.max(1, ...dayKeys.map(k => Math.max(createdByDay[k], completedByDay[k])));
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const slot = plotW / n;
+  const barW = Math.max(2, slot * 0.34);
+  const yFor = v => padT + plotH - (v / max) * plotH;
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', '100%');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.style.display = 'block';
+
+  const rect = (x, y, w, hgt, fill, title) => {
+    const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    r.setAttribute('x', x.toFixed(1)); r.setAttribute('y', y.toFixed(1));
+    r.setAttribute('width', w.toFixed(1)); r.setAttribute('height', Math.max(0, hgt).toFixed(1));
+    r.setAttribute('rx', '2'); r.setAttribute('fill', fill);
+    if (title) { const tEl = document.createElementNS('http://www.w3.org/2000/svg', 'title'); tEl.textContent = title; r.appendChild(tEl); }
+    return r;
+  };
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', padL); line.setAttribute('x2', W - padR);
+  line.setAttribute('y1', padT + plotH); line.setAttribute('y2', padT + plotH);
+  line.setAttribute('stroke', 'var(--line)'); line.setAttribute('stroke-width', '1');
+  svg.appendChild(line);
+
+  dayKeys.forEach((k, i) => {
+    const cx = padL + slot * i + slot / 2;
+    const cv = createdByDay[k], dv = completedByDay[k];
+    const cy = yFor(cv), dy = yFor(dv);
+    const d = new Date(k + 'T00:00:00');
+    const lbl = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    svg.appendChild(rect(cx - barW - 1, cy, barW, padT + plotH - cy, 'var(--acc-1)', `${lbl}: ${cv} created`));
+    svg.appendChild(rect(cx + 1, dy, barW, padT + plotH - dy, '#22C55E', `${lbl}: ${dv} completed`));
+    // sparse x labels: first, middle, last
+    if (i === 0 || i === n - 1 || i === Math.floor(n / 2)) {
+      const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      txt.setAttribute('x', cx.toFixed(1));
+      txt.setAttribute('y', (H - 6).toFixed(1));
+      txt.setAttribute('text-anchor', i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle');
+      txt.setAttribute('font-size', '10');
+      txt.setAttribute('fill', 'var(--fg-3)');
+      txt.textContent = d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+      svg.appendChild(txt);
+    }
+  });
+
+  return h('div', { style: { padding: '4px 16px 16px' } }, svg);
+}
+
+// Per-project time-logged bars. Per-day breakdown isn't derivable from the task
+// payload (time_logged is a per-task SUM without entry dates), so we group by
+// project — useful and honest — and label totals with fmtMinutes.
+function TimeLoggedChart(tasks, projects) {
+  const byProj = new Map();
+  for (const x of tasks) {
+    const mins = Number(x.time_logged) || 0;
+    if (!mins) continue;
+    byProj.set(x.project, (byProj.get(x.project) || 0) + mins);
+  }
+  const rows = [...byProj.entries()]
+    .map(([pid, mins]) => ({ proj: projectById(pid), pid, mins }))
+    .sort((a, b) => b.mins - a.mins)
+    .slice(0, 6);
+  const max = Math.max(1, ...rows.map(r => r.mins));
+
+  const body = h('div', { style: { padding: '4px 16px 16px', display: 'grid', gap: '10px' } });
+  if (!rows.length) {
+    body.appendChild(h('div', { class: 'empty', style: { padding: '16px' } }, 'No time logged yet.'));
+    return body;
+  }
+  for (const r of rows) {
+    const color = (r.proj && r.proj.color) || 'var(--acc-1)';
+    const name = r.proj ? r.proj.name : 'No project';
+    body.appendChild(h('div', null,
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '4px', fontSize: '12.5px' } },
+        h('span', { class: 'hstack', style: { gap: '6px', alignItems: 'center' } },
+          h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: color } }),
+          name),
+        h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-2)' } }, fmtMinutes(r.mins))),
+      h('div', { style: { height: '6px', background: 'var(--bg-3)', borderRadius: '3px', overflow: 'hidden' } },
+        h('div', { style: { width: (r.mins / max) * 100 + '%', height: '100%', background: color, borderRadius: '3px', transition: 'width 0.5s' } })),
+    ));
+  }
+  return body;
 }
 
 function FocusRow(task, onClick) {
@@ -245,17 +479,6 @@ function FocusRow(task, onClick) {
   row.appendChild(labelRow);
   if (task.due) row.appendChild(DueDate(task.due, true));
   return row;
-}
-
-function relTime(iso) {
-  if (!iso) return '';
-  const then = new Date(iso.replace(' ', 'T') + 'Z');
-  const secs = Math.floor((Date.now() - then.getTime()) / 1000);
-  if (secs < 60) return 'just now';
-  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
-  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
-  if (secs < 604800) return Math.floor(secs / 86400) + 'd ago';
-  return then.toLocaleDateString();
 }
 
 window.renderDashboard = renderDashboard;

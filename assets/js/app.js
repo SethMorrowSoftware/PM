@@ -40,7 +40,30 @@
     quickAddStatus: 'todo',
     settingsOpen: false,
     mobileSidebarOpen: false,
+    notifOpen: false,
+    // v2 collections
+    notifications: [],
+    unread: 0,
+    milestones: [],
+    customFields: [],
+    // theme: explicit user choice ('dark'|'light'); null = follow OS
+    theme: localStorage.getItem('pm_theme') || 'dark',
+    // view-local UI state, LIFTED here so it survives full re-renders
+    ui: {
+      list:      { groupBy: 'status', sortBy: 'priority', sortDir: 'asc', collapsed: {}, selected: [] },
+      calendar:  { cursor: ymd(today()).slice(0, 8) + '01' },
+      checklist: { expanded: {}, showCompleted: false },
+      kanban:    { swimlane: 'none' },
+      timeline:  { zoom: 'week', cursor: ymd(today()) },
+    },
   };
+  // Apply persisted theme immediately (index.html also sets it pre-paint).
+  try {
+    const savedTheme = localStorage.getItem('pm_theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      document.documentElement.dataset.theme = savedTheme;
+    }
+  } catch { /* ignore */ }
   const saved = localStorage.getItem('pm_project');
   if (saved && saved !== 'null') state.filterProject = parseInt(saved, 10);
   const savedAssignee = localStorage.getItem('pm_assignee');
@@ -108,6 +131,42 @@
   // nudge the feed without reaching into app.js internals.
   window.pmRefreshActivity = () => refreshActivity();
   window.pmCreateLabelFromPicker = (name, projectId) => createLabelFromPicker(name, projectId);
+
+  // ----- v2 boot loads + helpers -----
+  function loadNotifications() {
+    return API.listNotifications().then(r => {
+      state.notifications = r.notifications || [];
+      state.unread = r.unread || 0;
+      renderApp();
+    }).catch(e => console.warn('Notifications load failed:', e));
+  }
+  function loadMilestones() {
+    return API.listMilestones().then(r => { state.milestones = r.milestones || []; renderApp(); })
+      .catch(e => console.warn('Milestones load failed:', e));
+  }
+  function loadCustomFields() {
+    return API.listCustomFields().then(r => { state.customFields = r.fields || []; renderApp(); })
+      .catch(e => console.warn('Custom fields load failed:', e));
+  }
+  function toggleTheme() {
+    state.theme = state.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = state.theme;
+    try { localStorage.setItem('pm_theme', state.theme); } catch { /* ignore */ }
+    renderApp();
+  }
+  loadNotifications();
+  loadMilestones();
+  loadCustomFields();
+  // Light polling keeps the notification bell fresh without SSE/websockets,
+  // which are impractical on shared cPanel hosting.
+  setInterval(loadNotifications, 60000);
+
+  // Exposed so view modules / the task drawer can refresh shared data.
+  window.pmRefreshTasks = () => refreshTasks();
+  window.pmLoadNotifications = () => loadNotifications();
+  window.pmLoadMilestones = () => loadMilestones();
+  window.pmLoadCustomFields = () => loadCustomFields();
+  window.pmToggleTheme = () => toggleTheme();
 
   // ----- actions -----
   async function refreshTasks() {
@@ -202,7 +261,7 @@
     renderApp();
   }
   async function saveCurrentView() {
-    const name = prompt('Name this view');
+    const name = await promptDialog({ title: 'Save view', label: 'Name this view', placeholder: 'e.g. My urgent tasks' });
     if (!name) return;
     const payload = {
       name,
@@ -409,6 +468,7 @@
         state.quickAddDefaults = {
           projectId: extras.projectId ?? null,
           assigneeId: extras.assigneeId ?? null,
+          due: extras.due ?? null,
         };
         state.quickAddOpen = true;
         renderApp();
@@ -419,6 +479,7 @@
       onBulkUpdate: bulkUpdateTasks,
       onToggleSubtask: toggleSubtask,
       onMoveTaskDate: (id, due) => updateTask(id, { due }),
+      onReorder: (id, patch) => updateTask(id, patch),
       onNavigate: (v, projectId) => {
         state.view = v;
         if (projectId !== undefined) state.filterProject = projectId;
@@ -433,9 +494,49 @@
       case 'list':      content.appendChild(renderList(tasks, handlers)); break;
       case 'checklist': content.appendChild(renderChecklist(state.tasks, handlers)); break;
       case 'calendar':  content.appendChild(renderCalendar(tasks, handlers)); break;
+      case 'timeline':  content.appendChild(renderTimeline(tasks, handlers)); break;
       default: content.appendChild(h('div', { class: 'empty' }, 'Unknown view'));
     }
     return main;
+  }
+
+  // Notification dropdown, portalled via openPopover and anchored to the bell.
+  function openNotifications(anchor) {
+    openPopover(anchor, ({ close }) => {
+      const wrap = h('div', { class: 'notif-panel' });
+      wrap.appendChild(h('div', {
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                 padding: '10px 12px', borderBottom: '1px solid var(--line)' } },
+        h('strong', { style: { fontSize: 'var(--fs-md, 13px)' } }, 'Notifications'),
+        state.notifications.some(n => !n.is_read)
+          ? h('button', { class: 'btn btn-ghost', style: { fontSize: '11.5px', padding: '3px 7px' },
+              onClick: async () => { try { await API.markAllNotificationsRead(); } catch (e) { toast(e.message, 'error'); } await loadNotifications(); close(); } },
+              'Mark all read')
+          : null,
+      ));
+      if (!state.notifications.length) {
+        wrap.appendChild(h('div', { class: 'empty', style: { padding: '24px 16px' } }, "You're all caught up."));
+      }
+      for (const n of state.notifications) {
+        wrap.appendChild(h('div', {
+          class: 'notif-item' + (n.is_read ? '' : ' unread'),
+          onClick: async () => {
+            if (!n.is_read) { try { await API.markNotificationRead(n.id); } catch { /* ignore */ } }
+            close();
+            if (n.task_id) { state.openTaskId = n.task_id; setTaskHash(n.task_id); }
+            await loadNotifications();
+            renderApp();
+          },
+        },
+          n.actor ? Avatar(n.actor, 26) : h('span', { class: 'notif-ico' }, Icon('bell', 14)),
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('div', { style: { fontSize: '12.5px', color: 'var(--fg-1)' } }, n.body || n.type),
+            h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', marginTop: '2px' } }, relTime(n.created_at)),
+          ),
+        ));
+      }
+      return wrap;
+    }, { align: 'end' });
   }
 
   function renderTopbar() {
@@ -446,7 +547,7 @@
       onClick: () => { state.mobileSidebarOpen = !state.mobileSidebarOpen; renderApp(); },
     }, Icon('list', 16)));
     const proj = state.filterProject ? projectById(state.filterProject) : null;
-    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar' };
+    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline' };
     bar.appendChild(h('div', { class: 'crumbs' },
       h('span', null, 'Workspace'),
       Icon('chevronRight', 12, 1.75, 'sep'),
@@ -464,6 +565,15 @@
     search.appendChild(input);
     search.appendChild(h('span', { class: 'kbd' }, navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl+K'));
     bar.appendChild(search);
+
+    // Theme toggle (sun/moon) — built in ui.js, reads window.state.theme.
+    bar.appendChild(ThemeToggle(toggleTheme));
+
+    // Notification bell + unread badge.
+    const bell = h('button', { class: 'icon-btn', title: 'Notifications', style: { position: 'relative' } }, Icon('bell', 16));
+    if (state.unread > 0) bell.appendChild(h('span', { class: 'badge-count' }, state.unread > 9 ? '9+' : String(state.unread)));
+    bell.addEventListener('click', () => openNotifications(bell));
+    bar.appendChild(bell);
 
     bar.appendChild(h('button', { class: 'btn btn-primary',
       onClick: () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); } },
@@ -507,6 +617,7 @@
       ['list',      'List',      'list'],
       ['checklist', 'My tasks',  'checkSquare'],
       ['calendar',  'Calendar',  'calendar'],
+      ['timeline',  'Timeline',  'gantt'],
     ];
     const tabs = h('div', { class: 'view-tabs' });
     for (const [k, l, ic] of viewDef) {
@@ -615,7 +726,7 @@
     const form = {
       title: '', status: state.quickAddStatus || 'todo',
       project: defaults.projectId || state.filterProject || (state.projects[0] && state.projects[0].id),
-      priority: 2, assignees, labels: [],
+      priority: 2, assignees, labels: [], due: defaults.due || null,
     };
 
     const frag = document.createDocumentFragment();
@@ -636,6 +747,7 @@
         const t = await createTask({
           title, status: form.status, project: form.project,
           priority: form.priority, assignees: form.assignees, labels: form.labels,
+          due: form.due,
         });
         close();
         state.openTaskId = t.id;
@@ -1134,7 +1246,7 @@
       }
     }
     async function deleteRecurringRule(rule) {
-      if (!confirm(`Delete recurring rule "${rule.title}"?`)) return;
+      if (!(await confirmDialog({ title: 'Delete recurring rule', message: `Delete recurring rule "${rule.title}"?`, confirmText: 'Delete', danger: true }))) return;
       try {
         await API.deleteRecurring(rule.id);
         await refreshRecurringAdmin();
@@ -1186,7 +1298,7 @@
 
     async function archiveProject(project, archived) {
       const action = archived ? 'archive' : 'unarchive';
-      if (!confirm(`Are you sure you want to ${action} "${project.name}"?`)) return;
+      if (!(await confirmDialog({ title: `${action[0].toUpperCase()}${action.slice(1)} project`, message: `Are you sure you want to ${action} "${project.name}"?`, confirmText: action[0].toUpperCase() + action.slice(1) }))) return;
       try {
         await API.updateProject(project.id, { archived });
         if (archived && state.filterProject == project.id) state.filterProject = null;
@@ -1203,8 +1315,8 @@
 
     async function deleteProject(project) {
       const detail = model.projectDetails[project.id];
-      const warning = detail ? `This project has ${detail.task_count || 0} tasks.` : '';
-      if (!confirm(`Delete "${project.name}" permanently?\n${warning}\nThis cannot be undone.`)) return;
+      const warning = detail ? `This project has ${detail.task_count || 0} tasks. ` : '';
+      if (!(await confirmDialog({ title: 'Delete project', message: `Delete "${project.name}" permanently? ${warning}This cannot be undone.`, confirmText: 'Delete', danger: true }))) return;
       try {
         await API.deleteProject(project.id, false);
       } catch (e) {
@@ -1259,7 +1371,7 @@
       }
     }
     async function deleteLabel(label) {
-      if (!confirm(`Delete label "${label.name}" permanently?`)) return;
+      if (!(await confirmDialog({ title: 'Delete label', message: `Delete label "${label.name}" permanently?`, confirmText: 'Delete', danger: true }))) return;
       try { await API.deleteLabel(label.id, false); }
       catch (e) {
         if (e.status === 409) {
@@ -1668,6 +1780,14 @@
         if (!model.recurringRules.length) recurringList.appendChild(h('div', { class: 'empty' }, 'No recurring rules yet.'));
         body.appendChild(recurringList);
       }
+
+      // v2: Milestones + Custom fields admin (self-contained panel, cached so
+      // its internal state survives settings re-renders).
+      if (!model.adminExtras && typeof renderAdminExtras === 'function') {
+        model.adminExtras = h('div');
+        try { model.adminExtras.appendChild(renderAdminExtras()); } catch (e) { /* optional panel */ }
+      }
+      if (model.adminExtras) body.appendChild(model.adminExtras);
     }
 
     refreshProjects();

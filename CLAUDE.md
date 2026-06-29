@@ -167,18 +167,62 @@ minutes". Any change that breaks that contract is a regression.
 3. Document the re-run in the PR description — operators have to visit
    `install.php` again to apply it (and then delete it again).
 
-## Known gaps (from README)
+## v2 capabilities (added on top of the original)
 
-Per `README.md:125-131`, three features are deliberately unimplemented:
+The app has grown well past its first cut. As of v2 it also ships:
 
-1. **File attachments** — would need an `uploads/` directory and an upload
-   endpoint. Skipped to keep attack surface small.
-2. **Real-time updates** — clients currently refresh on view switch. A
-   polling loop or SSE endpoint would fix it.
-3. **Admin UI** — user / project / label management is API-only. An admin
-   settings page is the natural next step.
+- **In-app notifications** (`api/notifications.php`, `api/notify_lib.php`): bell +
+  unread badge + dropdown, polled every 60s. Triggers live in `tasks.php`
+  (assign / comment / mention / status-done / dependency-unblocked). A lazy
+  due-soon + reminder **sweep** runs on requests (no cron) — `pm_run_due_sweep()`.
+- **@mentions** in comments (`comment_mentions`), **reactions** on comments
+  (`comment_reactions`), **watchers** (`task_watchers`).
+- **Planning**: manual drag-ordering via `tasks.position` (Kanban + List,
+  pointer/touch), **task dependencies** (`api/dependencies.php`, cycle-checked),
+  **start dates** + a **Timeline/Gantt view** (`views/timeline.js`),
+  **milestones** (`api/milestones.php`, admin-managed).
+- **Time tracking** (`api/time.php`, `time_entries`) and **custom fields**
+  (`api/custom_fields.php`, `custom_fields`/`task_custom_values`, admin-defined).
+- **Light/dark theming** via `:root[data-theme]` + `prefers-color-scheme`, a
+  topbar toggle, persisted in `localStorage.pm_theme` (also set pre-paint by an
+  inline script in every HTML head).
+- **PWA**: `manifest.json` + `sw.js` (offline shell, never caches `/api/`) +
+  `assets/icon.svg`. Mobile: pointer/touch drag everywhere; List/Calendar/
+  Dashboard reflow on phones.
+- **Hardening**: upload MIME sniff + allow-list, attachment-delete ownership,
+  lenient CSRF origin check + file-based login/register rate limiting
+  (`pm_csrf_check` / `pm_rate_limit` in `bootstrap.php`).
 
-See `PLAN.md` for the proposed implementation approach for all three.
+(File attachments, an Admin Settings UI, and refresh-on-change already shipped
+before v2; v2 adds light polling for notifications but still no SSE/websockets —
+impractical on shared cPanel hosting.)
+
+### v2 conventions worth knowing
+- **View-local UI state lives in `window.state.ui.<view>`** (list grouping/sort/
+  selection, calendar/timeline cursor, checklist expansion). This survives the
+  coarse `renderApp()` re-render — do NOT put it back in module closures.
+- Shared frontend atoms in `ui.js`: `relTime`, `fmtMinutes`,
+  `confirmDialog`/`promptDialog`/`modal` (accessible — **use instead of
+  `prompt()`/`confirm()`**), `datePickerPopover`, `mentionTextarea`,
+  `makeDraggable` (pointer/touch — **not** HTML5 DnD), `emojiReactionBar`,
+  `ThemeToggle`, `miniTaskChip`.
+- `app.js` exposes `window.pmRefreshTasks / pmLoadNotifications /
+  pmLoadMilestones / pmLoadCustomFields / pmToggleTheme` for views/the drawer.
+- New notification triggers/recipients go through `api/notify_lib.php`
+  (`pm_notify`, `pm_task_recipients`, `pm_add_watchers`, `pm_resolve_mentions`).
+- Script load order now also includes `views/timeline.js` and
+  `views/admin-extras.js` before `app.js`. The full v2 build spec is in
+  `docs/V2-CONTRACT.md`.
+
+## Authorization model (current)
+
+All **authenticated** users may read/write tasks, projects, and labels (a
+deliberate team-collaboration choice — see README + recent history; the
+"writes are admin-only" lines earlier in this file describe the original
+intent and are retained for context only). **Admin only**: Slack settings,
+recurring rules, user role changes, **custom-field definitions, and milestone
+create/edit/delete**. Attachment delete requires uploader-or-admin. Server-side
+checks remain authoritative.
 
 ## Don'ts
 

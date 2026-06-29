@@ -27,6 +27,7 @@ const API = {
   get(path)         { return this.request(path, { method: 'GET' }); },
   post(path, body)  { return this.request(path, { method: 'POST', body: JSON.stringify(body || {}) }); },
   patch(path, body) { return this.request(path, { method: 'PATCH', body: JSON.stringify(body || {}) }); },
+  put(path, body)   { return this.request(path, { method: 'PUT', body: JSON.stringify(body || {}) }); },
   del(path)         { return this.request(path, { method: 'DELETE' }); },
 
   // ---- auth ----
@@ -120,6 +121,43 @@ const API = {
   createSavedView(data)     { return this.post('saved_views.php', data); },
   updateSavedView(id, data) { return this.patch(`saved_views.php?id=${id}`, data); },
   deleteSavedView(id)       { return this.del(`saved_views.php?id=${id}`); },
+
+  // ---- v2: notifications ----
+  listNotifications()             { return this.get('notifications.php'); },
+  unreadCount()                   { return this.get('notifications.php?unread=1'); },
+  markNotificationRead(id)        { return this.patch(`notifications.php?id=${id}`, { is_read: true }); },
+  markAllNotificationsRead()      { return this.patch('notifications.php?all=1', { is_read: true }); },
+  deleteNotification(id)          { return this.del(`notifications.php?id=${id}`); },
+
+  // ---- v2: dependencies ----
+  listDependencies(taskId)        { return this.get(`dependencies.php?task_id=${taskId}`); },
+  addDependency(taskId, dependsOnId) { return this.post(`dependencies.php?task_id=${taskId}`, { depends_on_id: dependsOnId }); },
+  removeDependency(taskId, dependsOnId) { return this.del(`dependencies.php?task_id=${taskId}&depends_on_id=${dependsOnId}`); },
+
+  // ---- v2: time tracking ----
+  listTime(taskId)                { return this.get(`time.php?task_id=${taskId}`); },
+  addTime(taskId, data)           { return this.post(`time.php?task_id=${taskId}`, data); },
+  deleteTime(entryId)             { return this.del(`time.php?id=${entryId}`); },
+
+  // ---- v2: custom fields ----
+  listCustomFields()              { return this.get('custom_fields.php'); },
+  createCustomField(data)         { return this.post('custom_fields.php', data); },
+  updateCustomField(id, patch)    { return this.patch(`custom_fields.php?id=${id}`, patch); },
+  deleteCustomField(id)           { return this.del(`custom_fields.php?id=${id}`); },
+  setCustomValue(taskId, fieldId, value) { return this.put(`custom_fields.php?task_id=${taskId}&field_id=${fieldId}`, { value }); },
+
+  // ---- v2: milestones ----
+  listMilestones()                { return this.get('milestones.php'); },
+  createMilestone(data)           { return this.post('milestones.php', data); },
+  updateMilestone(id, patch)      { return this.patch(`milestones.php?id=${id}`, patch); },
+  deleteMilestone(id)             { return this.del(`milestones.php?id=${id}`); },
+
+  // ---- v2: watchers / activity / reactions (task sub-routes) ----
+  watchTask(taskId)               { return this.post(`tasks.php?id=${taskId}&watch=1`, {}); },
+  unwatchTask(taskId)             { return this.del(`tasks.php?id=${taskId}&watch=1`); },
+  taskActivity(taskId)            { return this.get(`tasks.php?id=${taskId}&activity=1`); },
+  addReaction(taskId, commentId, emoji)    { return this.post(`tasks.php?id=${taskId}&comments=1&comment_id=${commentId}&reaction=${encodeURIComponent(emoji)}`, {}); },
+  removeReaction(taskId, commentId, emoji) { return this.del(`tasks.php?id=${taskId}&comments=1&comment_id=${commentId}&reaction=${encodeURIComponent(emoji)}`); },
 };
 
 window.API = API;

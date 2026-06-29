@@ -1,20 +1,53 @@
 // Task detail drawer.
-// Comments are cached per-task-id on the window so re-renders of the drawer
-// (which happen on every state update) don't re-fetch the same comments.
-window._pmCommentsCache = window._pmCommentsCache || {};
+//
+// The drawer is re-created on every renderApp() (app.js builds it fresh from
+// state.tasks each time). To keep async-loaded data (comments, activity,
+// dependencies, time entries) from flickering / re-fetching on every re-render
+// we cache it per-open-session on the window. The cache is keyed by task id and
+// invalidated whenever a *different* task is opened, so each open of a task
+// fetches fresh data (no stale reuse across opens) while surviving in-session
+// re-renders.
+window._pmDrawerCache = window._pmDrawerCache || {};      // { [taskId]: {comments, activity, deps, time} }
 window._pmAttachmentsCache = window._pmAttachmentsCache || {};
+window._pmDrawerOpenFor = window._pmDrawerOpenFor;        // task id the cache is valid for
+
+function pmDrawerCache(taskId) {
+  // Switching tasks (or first open) invalidates everything so we refetch fresh.
+  if (window._pmDrawerOpenFor !== taskId) {
+    window._pmDrawerOpenFor = taskId;
+    window._pmDrawerCache = {};
+    window._pmAttachmentsCache = {};
+  }
+  return (window._pmDrawerCache[taskId] = window._pmDrawerCache[taskId] || {
+    comments: null, activity: null, deps: null, time: null, _focused: false,
+  });
+}
 
 function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubtask, onDeleteSubtask, onDeleteTask }) {
+  const cache = pmDrawerCache(task.id);
+
   const scrim = h('div', { class: 'scrim light', onClick: onClose });
-  const drawer = h('div', { class: 'drawer' });
+  const drawer = h('div', {
+    class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': (task.ref || 'Task') + ' details', tabindex: '-1',
+  });
   const host = document.createDocumentFragment();
   host.appendChild(scrim);
   host.appendChild(drawer);
 
+  // Return focus to whatever was focused before the drawer opened.
+  const prevFocus = document.activeElement;
+
   let editingTitle = false;
   let tempTitle = task.title;
   let newSubtaskText = '';
-  let comments = window._pmCommentsCache[task.id] || null;
+  let newCommentText = '';
+  let newBlockerQuery = '';
+  let logMinutes = '';
+  let logNote = '';
+  let comments = cache.comments;
+  let activity = cache.activity;
+  let deps = cache.deps;
+  let timeData = cache.time;
   let attachments = window._pmAttachmentsCache[task.id] || null;
   let uploadingAttachment = false;
 
@@ -22,11 +55,34 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     try {
       const r = await API.listComments(task.id);
       comments = r.comments || [];
-      window._pmCommentsCache[task.id] = comments;
+      cache.comments = comments;
       redraw();
     } catch (e) { toast('Could not load comments: ' + e.message, 'error'); }
   }
-  if (comments === null) loadComments();
+  async function loadActivity() {
+    try {
+      const r = await API.taskActivity(task.id);
+      activity = r.activity || [];
+      cache.activity = activity;
+      redraw();
+    } catch (e) { toast('Could not load activity: ' + e.message, 'error'); }
+  }
+  async function loadDeps() {
+    try {
+      const r = await API.listDependencies(task.id);
+      deps = { blocked_by: r.blocked_by || [], blocks: r.blocks || [] };
+      cache.deps = deps;
+      redraw();
+    } catch (e) { toast('Could not load dependencies: ' + e.message, 'error'); }
+  }
+  async function loadTime() {
+    try {
+      const r = await API.listTime(task.id);
+      timeData = { entries: r.entries || [], total_minutes: r.total_minutes || 0 };
+      cache.time = timeData;
+      redraw();
+    } catch (e) { toast('Could not load time entries: ' + e.message, 'error'); }
+  }
   async function loadAttachments() {
     try {
       const r = await API.listAttachments(task.id);
@@ -35,7 +91,46 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       redraw();
     } catch (e) { toast('Could not load attachments: ' + e.message, 'error'); }
   }
+  if (comments === null) loadComments();
+  if (activity === null) loadActivity();
+  if (deps === null) loadDeps();
+  if (timeData === null) loadTime();
   if (attachments === null) loadAttachments();
+
+  // After mutating board-visible data, refresh the shared task list so other
+  // views stay consistent. renderApp() rebuilds this drawer from state.tasks;
+  // because the cache is keyed to the same open task it survives, so the
+  // section we just updated still shows its data.
+  function refreshBoard() { if (window.pmRefreshTasks) window.pmRefreshTasks(); }
+
+  // ---- @mention rendering: wrap "@Full Name" with <span class="mention"> ----
+  // Uses the comment's resolved mention ids -> user names so we only highlight
+  // real mentions (matching the server's exact full-name resolution).
+  function renderCommentBody(c) {
+    const wrap = h('span', { style: { fontSize: '13px', color: 'var(--fg-1)', whiteSpace: 'pre-wrap' } });
+    const text = c.body || '';
+    const ids = Array.isArray(c.mentions) ? c.mentions : [];
+    const names = ids.map(id => userById(id)?.name).filter(Boolean);
+    if (!names.length) { wrap.appendChild(document.createTextNode(text)); return wrap; }
+    // Build a regex that matches "@" + any of the mentioned full names.
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('@(' + names.map(esc).join('|') + ')', 'g');
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) wrap.appendChild(document.createTextNode(text.slice(last, m.index)));
+      wrap.appendChild(h('span', { class: 'mention' }, '@' + m[1]));
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) wrap.appendChild(document.createTextNode(text.slice(last)));
+    return wrap;
+  }
+
+  function sectionLabel(text, trailing) {
+    return h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' } },
+      h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600' } }, text),
+      trailing || null,
+    );
+  }
 
   function redraw() {
     drawer.replaceChildren();
@@ -50,21 +145,41 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     if (proj) head.appendChild(h('span', { style: { display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: proj.color } },
       h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: proj.color } }),
       proj.name));
+
+    // Watch / Unwatch toggle
+    const watchers = Array.isArray(task.watchers) ? task.watchers : [];
+    const meId = window.state.me?.id;
+    const watching = meId != null && watchers.includes(meId);
+    const watchBtn = h('button', {
+      class: 'icon-btn', title: watching ? 'Unwatch' : 'Watch',
+      'aria-pressed': watching ? 'true' : 'false',
+      onClick: async () => {
+        try {
+          const r = watching ? await API.unwatchTask(task.id) : await API.watchTask(task.id);
+          task.watchers = r.watchers || [];
+          refreshBoard();
+          redraw();
+        } catch (e) { toast(e.message, 'error'); }
+      },
+    }, Icon(watching ? 'bellOff' : 'eye', 14));
+
     head.appendChild(h('div', { style: { marginLeft: 'auto' }, class: 'hstack' },
+      watchBtn,
       h('button', { class: 'icon-btn', title: 'Copy link',
         onClick: () => { navigator.clipboard?.writeText(`${location.origin}${location.pathname}#task=${task.id}`); toast('Link copied'); } },
         Icon('link', 14)),
       h('button', { class: 'icon-btn', title: 'Delete',
         onClick: async () => {
-          if (!confirm(`Delete ${task.ref}?\n\n${task.title}`)) return;
+          const ok = await confirmDialog({ title: `Delete ${task.ref}?`, message: task.title, confirmText: 'Delete', danger: true });
+          if (!ok) return;
           try {
             await onDeleteTask(task.id);
-            delete window._pmCommentsCache[task.id];
+            delete window._pmDrawerCache[task.id];
             delete window._pmAttachmentsCache[task.id];
             onClose();
           } catch (e) { toast(e.message, 'error'); }
         } }, Icon('trash', 14)),
-      h('button', { class: 'icon-btn', onClick: onClose }, Icon('x', 14)),
+      h('button', { class: 'icon-btn', title: 'Close', onClick: onClose }, Icon('x', 14)),
     ));
     drawer.appendChild(head);
 
@@ -157,15 +272,70 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Due
     grid.appendChild(PropLabel('clock', 'Due date'));
     {
-      const input = h('input', {
-        type: 'date', value: task.due || '',
-        style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-        onChange: async e => {
-          const v = e.target.value || null;
-          try { const r = await onUpdate(task.id, { due: v }); Object.assign(task, r.task || {due:v}); redraw(); } catch(err){toast(err.message,'error');}
-        },
+      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+        task.due ? DueDate(task.due) : h('span', { style: { color: 'var(--fg-3)' } }, 'Set due date'));
+      btn.addEventListener('click', () => {
+        datePickerPopover(btn, task.due || '', async v => {
+          const val = v || null;
+          try { const r = await onUpdate(task.id, { due: val }); Object.assign(task, r.task || {due: val}); redraw(); } catch(err){toast(err.message,'error');}
+        });
       });
-      grid.appendChild(h('div', { class: 'hstack' }, input, task.due ? DueDate(task.due) : null));
+      grid.appendChild(h('div', null, btn));
+    }
+
+    // Start date
+    grid.appendChild(PropLabel('calendar', 'Start date'));
+    {
+      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+        task.start_date ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('calendar', 11), parseISO(task.start_date).toLocaleDateString('en', { month: 'short', day: 'numeric' }))
+                        : h('span', { style: { color: 'var(--fg-3)' } }, 'Set start date'));
+      btn.addEventListener('click', () => {
+        datePickerPopover(btn, task.start_date || '', async v => {
+          const val = v || null;
+          try { const r = await onUpdate(task.id, { start_date: val }); Object.assign(task, r.task || {start_date: val}); refreshBoard(); redraw(); } catch(err){toast(err.message,'error');}
+        });
+      });
+      grid.appendChild(h('div', null, btn));
+    }
+
+    // Milestone
+    grid.appendChild(PropLabel('target', 'Milestone'));
+    {
+      const projMilestones = (window.state.milestones || []).filter(m => m.project_id == null || m.project_id == task.project);
+      const current = (window.state.milestones || []).find(m => m.id == task.milestone_id);
+      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+        current ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('target', 11), current.name)
+                : h('span', { style: { color: 'var(--fg-3)' } }, 'No milestone'));
+      btn.addEventListener('click', () => {
+        openPopover(btn, ({ close }) => {
+          const wrap = h('div');
+          wrap.appendChild(h('div', { class: 'popover-header' }, 'Milestone'));
+          const pick = async (val) => {
+            try { const r = await onUpdate(task.id, { milestone_id: val }); Object.assign(task, r.task || { milestone_id: val }); refreshBoard(); redraw(); }
+            catch (e) { toast(e.message, 'error'); }
+            close();
+          };
+          wrap.appendChild(PopoverItem({
+            selected: task.milestone_id == null,
+            onSelect: () => pick(null),
+            leading: Icon('x', 12),
+            children: h('span', null, 'No milestone'),
+          }));
+          if (!projMilestones.length) {
+            wrap.appendChild(h('div', { class: 'empty', style: { padding: '10px' } }, 'No milestones for this project'));
+          }
+          for (const m of projMilestones) {
+            wrap.appendChild(PopoverItem({
+              selected: task.milestone_id == m.id,
+              onSelect: () => pick(m.id),
+              leading: Icon('target', 12),
+              children: h('span', null, m.name + (m.status === 'done' ? ' ✓' : '')),
+            }));
+          }
+          return wrap;
+        });
+      });
+      grid.appendChild(h('div', null, btn));
     }
 
     // Labels
@@ -206,6 +376,21 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     }
     body.appendChild(grid);
 
+    // Watchers
+    body.appendChild((() => {
+      const wsec = h('div', { style: { marginTop: '22px' } });
+      wsec.appendChild(sectionLabel(`Watchers · ${watchers.length}`));
+      const row = h('div', { class: 'hstack', style: { gap: '10px', alignItems: 'center' } });
+      if (watchers.length) row.appendChild(AvatarStack(watchers, 6, 24));
+      else row.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No watchers yet.'));
+      row.appendChild(h('button', {
+        class: 'btn btn-ghost', style: { marginLeft: 'auto', fontSize: '12px' },
+        onClick: () => watchBtn.click(),
+      }, Icon(watching ? 'bellOff' : 'eye', 13), watching ? ' Unwatch' : ' Watch'));
+      wsec.appendChild(row);
+      return wsec;
+    })());
+
     // Description
     body.appendChild(h('div', { style: { marginTop: '22px' } },
       h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '8px' } }, 'Description'),
@@ -228,8 +413,194 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       })(),
     ));
 
+    // Dependencies
+    body.appendChild((() => {
+      const dsec = h('div', { style: { marginTop: '24px' } });
+      const blockedBy = deps ? deps.blocked_by : [];
+      const blocks = deps ? deps.blocks : [];
+      dsec.appendChild(sectionLabel('Dependencies'));
+
+      const depPill = (t, kind) => {
+        const isBlocked = kind === 'blocked_by' && t.status !== 'done';
+        const pill = h('span', { class: 'dep-pill' + (isBlocked ? ' blocked' : '') },
+          miniTaskChip(t),
+          h('button', {
+            class: 'icon-btn sm', title: 'Remove dependency', style: { marginLeft: '4px' },
+            onClick: async () => {
+              // blocked_by: this task depends on t. blocks: t depends on this task.
+              const a = kind === 'blocked_by' ? task.id : t.id;
+              const b = kind === 'blocked_by' ? t.id : task.id;
+              try {
+                await API.removeDependency(a, b);
+                await loadDeps();
+                refreshBoard();
+              } catch (e) { toast(e.message, 'error'); }
+            },
+          }, Icon('x', 11)),
+        );
+        // Make the chip open the task it points to. Navigate via the URL hash
+        // so app.js's own hashchange listener opens it (renderApp/state are
+        // module-local in app.js and not reachable from here).
+        const chip = pill.querySelector('.mini-task-chip');
+        if (chip) {
+          chip.style.cursor = 'pointer';
+          chip.addEventListener('click', () => { location.hash = '#task=' + t.id; });
+        }
+        return pill;
+      };
+
+      // Blocked by
+      dsec.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, 'Blocked by'));
+      const bbWrap = h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' } });
+      if (deps == null) bbWrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, '…'));
+      else if (!blockedBy.length) bbWrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'Nothing'));
+      else blockedBy.forEach(t => bbWrap.appendChild(depPill(t, 'blocked_by')));
+      dsec.appendChild(bbWrap);
+
+      // Add blocker
+      const addBtn = h('button', { class: 'chip', style: { fontSize: '11.5px', marginBottom: '12px' } }, Icon('gitBranch', 11), ' Add blocker');
+      addBtn.addEventListener('click', () => {
+        openPopover(addBtn, ({ close }) => {
+          const wrap = h('div');
+          const input = h('input', { placeholder: 'Search tasks…', value: newBlockerQuery, autofocus: true });
+          wrap.appendChild(h('div', { class: 'pop-search' }, input));
+          wrap.appendChild(h('div', { class: 'popover-header' }, 'Add a blocking task'));
+          const list = h('div', { style: { maxHeight: '240px', overflowY: 'auto' } });
+          wrap.appendChild(list);
+          const existing = new Set([task.id, ...blockedBy.map(t => t.id)]);
+          function render(q = '') {
+            list.replaceChildren();
+            const ql = q.toLowerCase();
+            const results = (window.state.tasks || []).filter(t =>
+              !existing.has(t.id) &&
+              ((t.title || '').toLowerCase().includes(ql) || (t.ref || '').toLowerCase().includes(ql))
+            ).slice(0, 12);
+            if (!results.length) { list.appendChild(h('div', { class: 'empty', style: { padding: '10px' } }, 'No matching tasks')); return; }
+            for (const t of results) {
+              list.appendChild(PopoverItem({
+                onSelect: async () => {
+                  try {
+                    await API.addDependency(task.id, t.id);
+                    newBlockerQuery = '';
+                    await loadDeps();
+                    refreshBoard();
+                    close();
+                  } catch (e) {
+                    // Cycle / self-link errors come back as 400 with a message.
+                    toast(e.message || 'Could not add dependency', 'error');
+                  }
+                },
+                children: miniTaskChip(t),
+              }));
+            }
+          }
+          input.addEventListener('input', e => { newBlockerQuery = e.target.value; render(e.target.value); });
+          render(newBlockerQuery);
+          return wrap;
+        });
+      });
+      dsec.appendChild(addBtn);
+
+      // Blocks
+      dsec.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, 'Blocks'));
+      const blWrap = h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } });
+      if (deps == null) blWrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, '…'));
+      else if (!blocks.length) blWrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'Nothing'));
+      else blocks.forEach(t => blWrap.appendChild(depPill(t, 'blocks')));
+      dsec.appendChild(blWrap);
+
+      return dsec;
+    })());
+
+    // Time tracking
+    body.appendChild((() => {
+      const tsec = h('div', { style: { marginTop: '24px' } });
+      const total = timeData ? timeData.total_minutes : 0;
+      const entries = timeData ? timeData.entries : [];
+      const estLabel = task.estimate ? ` of ${task.estimate}` : '';
+      tsec.appendChild(sectionLabel(
+        'Time tracking',
+        h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-2)' } },
+          timeData == null ? '…' : `${fmtMinutes(total)} logged${estLabel}`),
+      ));
+
+      const list = h('div', { style: { display: 'grid', gap: '6px', marginBottom: '10px' } });
+      if (timeData && entries.length) {
+        const myId = window.state.me?.id;
+        for (const en of entries) {
+          const canDelete = window.state.me?.is_admin || (en.user && en.user.id === myId);
+          list.appendChild(h('div', { class: 'time-entry' },
+            en.user ? Avatar(en.user, 20) : h('span', { class: 'avatar', style: { width: '20px', height: '20px' } }, '?'),
+            h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, fmtMinutes(en.minutes)),
+            h('span', { style: { fontSize: '12px', color: 'var(--fg-2)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              (en.note ? en.note + ' · ' : '') + (en.user ? en.user.name : 'Former teammate')),
+            h('span', { style: { fontSize: '11px', color: 'var(--fg-3)' } }, en.spent_on || relTime(en.created_at)),
+            canDelete ? h('button', {
+              class: 'icon-btn sm', title: 'Delete entry',
+              onClick: async () => {
+                const ok = await confirmDialog({ title: 'Delete time entry?', confirmText: 'Delete', danger: true });
+                if (!ok) return;
+                try { await API.deleteTime(en.id); await loadTime(); refreshBoard(); }
+                catch (e) { toast(e.message, 'error'); }
+              },
+            }, Icon('trash', 11)) : null,
+          ));
+        }
+      } else if (timeData && !entries.length) {
+        list.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No time logged yet.'));
+      }
+      tsec.appendChild(list);
+
+      // Quick log form
+      const minInput = h('input', {
+        type: 'number', min: '1', placeholder: 'min', value: logMinutes,
+        style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+        onInput: e => { logMinutes = e.target.value; },
+      });
+      const noteInput = h('input', {
+        type: 'text', placeholder: 'Note (optional)', value: logNote,
+        style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
+        onInput: e => { logNote = e.target.value; },
+      });
+      const submitTime = async () => {
+        const mins = parseInt(logMinutes, 10);
+        if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
+        try {
+          await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
+          logMinutes = ''; logNote = '';
+          await loadTime();
+          refreshBoard();
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+      noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+      tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
+        Icon('clock', 13),
+        minInput, noteInput,
+        h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
+      ));
+      return tsec;
+    })());
+
+    // Custom fields
+    {
+      const fields = (window.state.customFields || []).filter(f =>
+        !f.archived && (f.project_id == null || f.project_id == task.project));
+      if (fields.length) {
+        const cfSec = h('div', { style: { marginTop: '24px' } });
+        cfSec.appendChild(sectionLabel('Custom fields'));
+        const cfGrid = h('div', { style: { display: 'grid', gridTemplateColumns: '110px 1fr', rowGap: '10px', alignItems: 'center' } });
+        for (const f of fields) {
+          cfGrid.appendChild(PropLabel('settings', f.name));
+          cfGrid.appendChild(h('div', { class: 'cf-field' }, customFieldEditor(f, task)));
+        }
+        cfSec.appendChild(cfGrid);
+        body.appendChild(cfSec);
+      }
+    }
+
     // Subtasks
-    const subSection = h('div', { style: { marginTop: '22px' } });
+    const subSection = h('div', { style: { marginTop: '24px' } });
     subSection.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' } },
       h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600' } }, 'Subtasks'),
       sub.length > 0 ? h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-2)' } }, `${subDone}/${sub.length}`) : null,
@@ -327,7 +698,8 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             class: 'btn btn-ghost',
             style: { fontSize: '11px', padding: '2px 6px' },
             onClick: async () => {
-              if (!confirm(`Delete attachment \"${a.name}\"?`)) return;
+              const ok = await confirmDialog({ title: 'Delete attachment?', message: a.name, confirmText: 'Delete', danger: true });
+              if (!ok) return;
               try {
                 await API.deleteAttachment(a.id);
                 attachments = attachments.filter(x => x.id !== a.id);
@@ -382,84 +754,276 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     const cmtSection = h('div', { style: { marginTop: '24px' } });
     cmtSection.appendChild(h('div', {
       style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '10px' }
-    }, `Activity · ${comments == null ? '…' : comments.length} comment${comments && comments.length === 1 ? '' : 's'}`));
+    }, `Comments · ${comments == null ? '…' : comments.length}`));
 
-    const list = h('div', { style: { display: 'grid', gap: '10px' } });
+    const list = h('div', { style: { display: 'grid', gap: '12px' } });
     if (comments) {
       for (const c of comments) {
         const canModerate = (window.state.me?.is_admin) || (c.user?.id === window.state.me?.id);
-        const bodyEl = h('div', { style: { fontSize: '13px', color: 'var(--fg-1)', marginTop: '4px', whiteSpace: 'pre-wrap' } }, c.body);
         list.appendChild(h('div', { style: { display: 'flex', gap: '10px' } },
           Avatar(c.user, 28),
-          h('div', { style: { flex: 1 } },
+          h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { fontSize: '12.5px', color: 'var(--fg-1)', display: 'flex', alignItems: 'center', gap: '6px' } },
               h('span', { style: { fontWeight: 600 } }, c.user.name),
               h('span', { style: { color: 'var(--fg-3)', fontSize: '11.5px' } }, relTime(c.created_at)),
               c.updated_at ? h('span', { style: { color: 'var(--fg-4)', fontSize: '10.5px' } }, '(edited)') : null,
               canModerate ? h('button', { class: 'btn btn-ghost', style: { marginLeft: 'auto', fontSize: '11px', padding: '2px 6px' }, onClick: async () => {
-                const next = prompt('Edit comment', c.body);
+                const next = await promptDialog({ title: 'Edit comment', value: c.body, multiline: true });
                 if (next == null) return;
                 if (!next.trim()) return toast('Comment cannot be empty', 'error');
                 try {
                   const r = await API.updateComment(task.id, c.id, next.trim());
                   const idx = comments.findIndex(x => x.id === c.id);
                   if (idx >= 0) comments[idx] = r.comment;
-                  window._pmCommentsCache[task.id] = comments;
+                  cache.comments = comments;
                   redraw();
                 } catch (e) { toast(e.message, 'error'); }
               } }, 'Edit') : null,
               canModerate ? h('button', { class: 'btn btn-ghost', style: { fontSize: '11px', padding: '2px 6px' }, onClick: async () => {
-                if (!confirm('Delete this comment?')) return;
+                const ok = await confirmDialog({ title: 'Delete this comment?', confirmText: 'Delete', danger: true });
+                if (!ok) return;
                 try {
                   await API.deleteComment(task.id, c.id);
                   comments = comments.filter(x => x.id !== c.id);
-                  window._pmCommentsCache[task.id] = comments;
+                  cache.comments = comments;
                   redraw();
                 } catch (e) { toast(e.message, 'error'); }
               } }, 'Delete') : null,
             ),
-            bodyEl,
+            h('div', { style: { marginTop: '4px' } }, renderCommentBody(c)),
+            // Reactions
+            emojiReactionBar(c.reactions || [], async (emoji) => {
+              const existing = (c.reactions || []).find(r => r.emoji === emoji);
+              try {
+                if (existing && existing.mine) await API.removeReaction(task.id, c.id, emoji);
+                else await API.addReaction(task.id, c.id, emoji);
+                await loadComments();
+              } catch (e) { toast(e.message, 'error'); }
+            }),
           ),
         ));
       }
+      if (!comments.length) list.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No comments yet.'));
     }
     cmtSection.appendChild(list);
 
-    // New comment box
+    // New comment box (with @mention autocomplete)
     const me = window.state.me;
-    const ccInput = h('input', {
-      placeholder: 'Leave a comment...',
-      style: { width: '100%', background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
-    });
     const submit = async () => {
-      const v = ccInput.value.trim();
+      const v = (newCommentText || '').trim();
       if (!v) return;
       try {
         const r = await API.addComment(task.id, v);
         comments = comments || [];
         comments.push(r.comment);
-        window._pmCommentsCache[task.id] = comments;
-        ccInput.value = '';
+        cache.comments = comments;
+        newCommentText = '';
+        // A new comment can add watchers / mentions server-side; refresh task +
+        // notifications + the per-task activity timeline.
+        refreshBoard();
+        if (window.pmLoadNotifications) window.pmLoadNotifications();
+        if (window.pmRefreshActivity) window.pmRefreshActivity();
+        loadActivity();
         redraw();
-        window.pmRefreshActivity && window.pmRefreshActivity();
       } catch(e){toast(e.message,'error');}
     };
-    ccInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    const composer = mentionTextarea({
+      value: newCommentText,
+      placeholder: 'Leave a comment… use @ to mention',
+      onInput: v => { newCommentText = v; },
+      onSubmit: submit,
+    });
     cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
       Avatar(me, 28),
-      h('div', { style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px', padding: '10px' } },
-        ccInput,
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        composer,
         h('div', { style: { display: 'flex', justifyContent: 'flex-end', marginTop: '8px' } },
           h('button', { class: 'btn btn-primary', style: { padding: '4px 10px', fontSize: '12px' }, onClick: submit }, 'Comment')),
       ),
     ));
     body.appendChild(cmtSection);
 
+    // Activity timeline
+    const tlSection = h('div', { style: { marginTop: '24px' } });
+    tlSection.appendChild(h('div', {
+      style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '10px' }
+    }, 'Activity'));
+    const tl = h('div', { class: 'timeline' });
+    if (activity == null) {
+      tl.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'Loading…'));
+    } else if (!activity.length) {
+      tl.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No activity yet.'));
+    } else {
+      for (const a of activity) {
+        tl.appendChild(h('div', { class: 'tl-row', style: { display: 'flex', gap: '10px', alignItems: 'flex-start' } },
+          Avatar(a.user, 22),
+          h('div', { style: { flex: 1, minWidth: 0, fontSize: '12.5px', color: 'var(--fg-2)' } },
+            h('span', { style: { fontWeight: 600, color: 'var(--fg-1)' } }, a.user?.name || 'Someone'),
+            ' ',
+            h('span', null, activityVerb(a.action)),
+            a.detail ? h('span', { style: { color: 'var(--fg-3)' } }, ' — ' + a.detail) : null,
+            h('span', { style: { color: 'var(--fg-4)', fontSize: '11px', marginLeft: '6px' } }, relTime(a.created_at)),
+          ),
+        ));
+      }
+    }
+    tlSection.appendChild(tl);
+    body.appendChild(tlSection);
+
     drawer.appendChild(body);
   }
 
+  // ----- accessibility: focus trap + Escape + return focus -----
+  const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function onKey(e) {
+    if (e.key === 'Escape') {
+      // Defer to any overlay above the drawer. modal()/confirmDialog()/
+      // promptDialog() handle Escape on a capture-phase document listener and
+      // call preventDefault (so by the time this bubble handler runs the modal
+      // is already gone but defaultPrevented is set). openPopover() closes on a
+      // bubble listener AFTER this one, so it's still in the DOM here — detect
+      // it directly. In either case, don't also close the drawer.
+      if (e.defaultPrevented) return;
+      if (document.querySelector('.popover') || document.querySelector('.modal')) return;
+      e.preventDefault();
+      onClose();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // If an inner control already handled Tab (e.g. the @mention autocomplete
+    // accepting a match), don't also run the focus trap.
+    if (e.defaultPrevented) return;
+    const items = [...drawer.querySelectorAll(FOCUSABLE)].filter(el => el.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !drawer.contains(active)) { e.preventDefault(); last.focus(); }
+    } else {
+      if (active === last || !drawer.contains(active)) { e.preventDefault(); first.focus(); }
+    }
+  }
+  drawer.addEventListener('keydown', onKey);
+  // Restore focus when the drawer leaves the DOM (close, delete, or re-render
+  // replacing the root). renderApp() removes this node; a re-render of the same
+  // open task immediately re-adds a fresh one, so only restore focus if nothing
+  // re-mounted a drawer (i.e. it was actually closed).
+  const mo = new MutationObserver(() => {
+    if (!document.body.contains(drawer)) {
+      mo.disconnect();
+      setTimeout(() => {
+        if (!document.querySelector('.drawer') && prevFocus && typeof prevFocus.focus === 'function') {
+          try { prevFocus.focus(); } catch (_) {}
+        }
+      }, 0);
+    }
+  });
+  setTimeout(() => { try { mo.observe(document.body, { childList: true, subtree: true }); } catch (_) {} }, 0);
+
   redraw();
+  // Move initial focus into the drawer for keyboard/screen-reader users — but
+  // only on the first render of this open session. renderApp() re-creates the
+  // drawer on every state change; re-grabbing focus then would yank it away
+  // from whatever the user is editing.
+  if (!cache._focused) {
+    cache._focused = true;
+    setTimeout(() => {
+      if (!document.body.contains(drawer)) return;
+      const f = drawer.querySelector(FOCUSABLE);
+      (f || drawer).focus();
+    }, 0);
+  }
   return host;
+}
+
+// ---- custom field editor ----
+// Renders an input appropriate to the field_type, seeded from task.custom.
+// Saves via API.setCustomValue then mutates task.custom + refreshes the board.
+function customFieldEditor(field, task) {
+  const cur = (task.custom && task.custom[field.id] != null) ? task.custom[field.id] : '';
+  const baseStyle = { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' };
+
+  async function save(value) {
+    const v = value == null ? '' : String(value);
+    if (v === String(cur == null ? '' : cur)) return;
+    try {
+      await API.setCustomValue(task.id, field.id, v);
+      task.custom = task.custom || {};
+      if (v === '') delete task.custom[field.id];
+      else task.custom[field.id] = v;
+      if (window.pmRefreshTasks) window.pmRefreshTasks();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  switch (field.field_type) {
+    case 'number': {
+      return h('input', { type: 'number', value: cur, style: { ...baseStyle, width: '120px' },
+        onBlur: e => save(e.target.value) });
+    }
+    case 'date': {
+      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+        cur ? parseISO(cur).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })
+            : h('span', { style: { color: 'var(--fg-3)' } }, 'Set date'));
+      btn.addEventListener('click', () => datePickerPopover(btn, cur || '', v => save(v || '')));
+      return btn;
+    }
+    case 'checkbox': {
+      const checked = cur === '1' || cur === 'true' || cur === true;
+      const box = h('div', { style: { cursor: 'pointer', display: 'inline-flex' },
+        onClick: () => save(checked ? '' : '1') }, Checkbox(checked, 18));
+      return box;
+    }
+    case 'select': {
+      const opts = Array.isArray(field.options) ? field.options : [];
+      const sel = h('select', { style: { ...baseStyle, width: 'auto' }, onChange: e => save(e.target.value) },
+        h('option', { value: '' }, '—'),
+        ...opts.map(o => h('option', { value: o, selected: String(cur) === String(o) }, o)),
+      );
+      return sel;
+    }
+    case 'user': {
+      const u = userById(cur);
+      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+        u ? h('span', { class: 'hstack', style: { gap: '6px' } }, Avatar(u, 18), u.name)
+          : h('span', { style: { color: 'var(--fg-3)' } }, 'Unassigned'));
+      btn.addEventListener('click', () => {
+        openPopover(btn, ({ close }) => {
+          const wrap = h('div');
+          wrap.appendChild(h('div', { class: 'popover-header' }, 'Select user'));
+          wrap.appendChild(PopoverItem({ selected: !cur, onSelect: () => { save(''); close(); }, leading: Icon('x', 12), children: h('span', null, 'Unassigned') }));
+          for (const usr of (window.state.users || [])) {
+            wrap.appendChild(PopoverItem({
+              selected: String(cur) === String(usr.id),
+              onSelect: () => { save(usr.id); close(); },
+              leading: Avatar(usr, 20),
+              children: h('span', null, usr.name),
+            }));
+          }
+          return wrap;
+        });
+      });
+      return btn;
+    }
+    default: { // text
+      return h('input', { type: 'text', value: cur, placeholder: '—', style: { ...baseStyle, width: '100%', maxWidth: '260px' },
+        onBlur: e => save(e.target.value) });
+    }
+  }
+}
+
+// Human-readable verb for an activity action key.
+function activityVerb(action) {
+  const map = {
+    created: 'created this task',
+    moved: 'changed status',
+    completed: 'completed this task',
+    commented: 'commented',
+    mention: 'mentioned someone',
+    updated: 'updated this task',
+    deleted: 'deleted this task',
+    recurring_spawn: 'generated this from a recurring rule',
+  };
+  return map[action] || (action || 'updated').replace(/_/g, ' ');
 }
 
 function PropLabel(icon, text) {
