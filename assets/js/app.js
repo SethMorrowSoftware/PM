@@ -368,6 +368,7 @@
     add('Settings', 'settings', () => { state.settingsOpen = true; renderApp(); }, 'Admin');
     add(state.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme', state.theme === 'light' ? 'moon' : 'sun', () => toggleTheme(), 'Theme');
     add('Export tasks to CSV', 'download', () => exportTasksCsv(filteredTasks()), 'Export');
+    add('Import tasks from CSV', 'upload', () => { if (typeof openImport === 'function') openImport(); }, 'Import');
     add('Clear filters', 'x', () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }, 'Filter');
     add(state.density === 'compact' ? 'Comfortable density' : 'Compact density', 'list', () => toggleDensity(), 'Display');
     add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
@@ -425,6 +426,10 @@
     if (state.profileOpen) rootEl.appendChild(renderProfile());
     if (state.settingsOpen) rootEl.appendChild(renderSettings());
     if (state.shortcutsOpen) rootEl.appendChild(renderShortcutsHelp());
+    // App-like bottom nav on phones — hidden while any overlay/drawer is open.
+    if (!state.openTaskId && !state.quickAddOpen && !state.settingsOpen && !state.profileOpen && !state.shortcutsOpen && !state.mobileSidebarOpen) {
+      rootEl.appendChild(renderMobileNav());
+    }
   }
 
   // ----- sidebar -----
@@ -550,6 +555,22 @@
       red: '#EF4444', blue: '#3B82F6', amber: '#F59E0B', green: '#22C55E',
       violet: '#A855F7', slate: '#64748B', pink: '#EC4899', cyan: '#06B6D4',
     }[name] || '#64748B';
+  }
+
+  // ----- mobile bottom nav (phones; CSS hides it on desktop) -----
+  function renderMobileNav() {
+    const item = (icon, label, active, onClick, extra) => h('button', {
+      class: 'mbn-item' + (active ? ' active' : '') + (extra ? ' ' + extra : ''),
+      'aria-current': active ? 'page' : null,
+      onClick,
+    }, Icon(icon, 19), h('span', null, label));
+    return h('nav', { class: 'mobile-bottom-nav', 'aria-label': 'Primary' },
+      item('home', 'Home', state.view === 'dashboard', () => { state.view = 'dashboard'; persist(); renderApp(); }),
+      item('checkSquare', 'My Tasks', state.view === 'checklist', () => { state.view = 'checklist'; persist(); renderApp(); }),
+      item('kanban', 'Board', state.view === 'kanban', () => { state.view = 'kanban'; persist(); renderApp(); }),
+      item('plus', 'New', false, () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); }, 'mbn-new'),
+      item('list', 'Menu', false, () => { state.mobileSidebarOpen = true; renderApp(); }),
+    );
   }
 
   // ----- main area -----
@@ -816,9 +837,13 @@
       });
       bar.appendChild(svBtn);
 
-      // Count
+      // Count + import/export
       const n = filteredTasks().length;
       bar.appendChild(h('div', { style: { marginLeft: 'auto' }, class: 'hstack' },
+        h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Import tasks from CSV',
+          onClick: () => { if (typeof openImport === 'function') openImport(); else toast('Import unavailable', 'error'); } }, Icon('upload', 12), ' Import'),
+        h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Export these tasks to CSV',
+          onClick: () => exportTasksCsv(filteredTasks()) }, Icon('download', 12), ' Export'),
         h('span', { style: { fontSize: '11.5px', color: 'var(--fg-3)' } }, `${n} task${n !== 1 ? 's' : ''}`),
       ));
     }
