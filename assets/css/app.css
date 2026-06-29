@@ -1021,3 +1021,6 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   border-radius: var(--radius-sm); padding: 1px 5px;
 }
 .md strong { font-weight: var(--fw-semibold, 600); color: var(--fg-0); }
+
+/* private-project lock in the sidebar */
+.nav-proj .proj-lock { color: var(--fg-3); flex-shrink: 0; margin-left: 2px; }

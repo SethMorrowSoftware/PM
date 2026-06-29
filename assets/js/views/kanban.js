@@ -102,6 +102,11 @@ function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder }) {
       });
       body.appendChild(card);
 
+      // Read-only members of a private project (can_write === false) may open a
+      // card to view it but can't drag-reorder or change its status. Only wire
+      // pointer-drag when the task is writable (undefined/true = the normal case).
+      if (t.can_write === false) continue;
+
       makeDraggable(card, {
         data: { id: t.id },
         onStart: (e) => {
@@ -184,6 +189,9 @@ function KanbanCard(task, { onOpen, onStatus }) {
   const subDone = sub.filter(s => s.done).length;
   const subPct = sub.length ? (subDone / sub.length) * 100 : 0;
   const blockedCount = (task.blocked_by && task.blocked_by.length) || 0;
+  // Read-only when the viewer is a viewer-role member of a private project.
+  // undefined/true (the normal case) means full access.
+  const readOnly = task.can_write === false;
 
   const card = h('div', {
     class: 'kb-card',
@@ -199,20 +207,29 @@ function KanbanCard(task, { onOpen, onStatus }) {
 
   if (proj) card.appendChild(h('div', { class: 'kb-card-strip', style: { background: proj.color } }));
 
-  // status menu button — keyboard/mobile fallback for changing status.
-  const statusBtn = h('button', {
-    class: 'icon-btn sm',
-    title: 'Change status',
-    'aria-label': 'Change status',
-    style: { marginLeft: 'auto' },
-    onClick: (e) => {
-      e.stopPropagation();
-      openPopover(statusBtn, ({ close }) =>
-        statusPickerContent(task.status, (newStatus) => { if (newStatus !== task.status) onStatus(newStatus); }, close),
-        { align: 'end' });
-    },
-    onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); },
-  }, Icon('more', 14));
+  // status menu button — keyboard/mobile fallback for changing status. On a
+  // read-only card this is replaced by a non-interactive view-only cue so we
+  // don't surface a status changer the viewer isn't allowed to use.
+  const statusBtn = readOnly
+    ? h('span', {
+        class: 'kb-readonly-cue',
+        title: 'View only',
+        'aria-label': 'View only',
+        style: { marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', color: 'var(--fg-4)' },
+      }, Icon('eye', 14))
+    : h('button', {
+        class: 'icon-btn sm',
+        title: 'Change status',
+        'aria-label': 'Change status',
+        style: { marginLeft: 'auto' },
+        onClick: (e) => {
+          e.stopPropagation();
+          openPopover(statusBtn, ({ close }) =>
+            statusPickerContent(task.status, (newStatus) => { if (newStatus !== task.status) onStatus(newStatus); }, close),
+            { align: 'end' });
+        },
+        onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); },
+      }, Icon('more', 14));
 
   card.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' } },
     h('span', { class: 'mono', style: { fontSize: '10.5px', color: 'var(--fg-3)' } }, task.ref),

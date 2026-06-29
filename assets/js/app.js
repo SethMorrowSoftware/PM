@@ -492,8 +492,10 @@
       },
         h('span', { class: 'proj-dot', style: { background: p.color } }),
         h('span', { class: 'proj-name' }, p.name),
+        p.visibility === 'private' ? Icon('lock', 11, 1.75, 'proj-lock') : null,
         h('span', { class: 'proj-count' }, String(count)),
       );
+      if (p.visibility === 'private') row.title = 'Private project — members only';
       projSection.appendChild(row);
     }
     scroll.appendChild(projSection);

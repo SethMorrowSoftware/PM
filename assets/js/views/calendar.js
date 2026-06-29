@@ -130,7 +130,9 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         t.comments > 0 ? h('span', { style: { marginLeft: '4px', fontSize: '10px', opacity: '0.8' } },
           Icon('message', 10), ' ' + t.comments) : null,
       );
-      if (!opts.noDrag) wireDrag(el, t.id);
+      // Read-only tasks (viewer in a private project) can be opened but not
+      // rescheduled by dragging — skip the drag wiring entirely.
+      if (!opts.noDrag && t.can_write !== false) wireDrag(el, t.id);
       return el;
     };
 
@@ -160,7 +162,8 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
           isStart ? t.title : '…'),
       );
       // Dragging a span moves its due date (consistent with single-day events).
-      wireDrag(el, t.id);
+      // Read-only tasks stay clickable but are not draggable.
+      if (t.can_write !== false) wireDrag(el, t.id);
       return el;
     };
 
@@ -282,7 +285,8 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
       },
         h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, t.title),
       );
-      wireDrag(chip, t.id);
+      // Read-only tasks can be opened from the rail but not dragged onto a day.
+      if (t.can_write !== false) wireDrag(chip, t.id);
       rail.appendChild(chip);
     }
     wrap.appendChild(rail);
