@@ -160,6 +160,12 @@ const API = {
   updateMilestone(id, patch)      { return this.patch(`milestones.php?id=${id}`, patch); },
   deleteMilestone(id)             { return this.del(`milestones.php?id=${id}`); },
 
+  // ---- v2.4: goals / OKRs ----
+  listGoals()                     { return this.get('goals.php'); },
+  createGoal(data)                { return this.post('goals.php', data); },
+  updateGoal(id, patch)           { return this.patch(`goals.php?id=${id}`, patch); },
+  deleteGoal(id)                  { return this.del(`goals.php?id=${id}`); },
+
   // ---- v2: watchers / activity / reactions (task sub-routes) ----
   watchTask(taskId)               { return this.post(`tasks.php?id=${taskId}&watch=1`, {}); },
   unwatchTask(taskId)             { return this.del(`tasks.php?id=${taskId}&watch=1`); },

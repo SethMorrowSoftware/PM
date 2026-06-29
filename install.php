@@ -433,6 +433,31 @@ function pm_install_schema(): void {
             INDEX idx_ar_project (project_id),
             CONSTRAINT fk_ar_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        // --- v2.4: goals / OKRs -------------------------------------------
+        "CREATE TABLE IF NOT EXISTS goals (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(160) NOT NULL,
+            description TEXT NULL,
+            due DATE NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'on_track',
+            progress_mode VARCHAR(8) NOT NULL DEFAULT 'auto',
+            manual_pct TINYINT NULL,
+            owner_id INT NULL,
+            sort_order INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_goal_owner (owner_id),
+            CONSTRAINT fk_goal_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+        "CREATE TABLE IF NOT EXISTS goal_projects (
+            goal_id INT NOT NULL,
+            project_id INT NOT NULL,
+            PRIMARY KEY (goal_id, project_id),
+            INDEX idx_gp_project (project_id),
+            CONSTRAINT fk_gp_goal    FOREIGN KEY (goal_id)    REFERENCES goals(id)    ON DELETE CASCADE,
+            CONSTRAINT fk_gp_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
     foreach ($sql as $q) $pdo->exec($q);
 

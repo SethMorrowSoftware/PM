@@ -48,6 +48,7 @@
     milestones: [],
     customFields: [],
     templates: [],
+    goals: [],
     // theme: explicit user choice ('dark'|'light'); null = follow OS
     theme: localStorage.getItem('pm_theme') || 'dark',
     density: localStorage.getItem('pm_density') === 'compact' ? 'compact' : 'comfortable',
@@ -156,6 +157,10 @@
     return API.listTemplates().then(r => { state.templates = r.templates || []; renderApp(); })
       .catch(e => console.warn('Templates load failed:', e));
   }
+  function loadGoals() {
+    return API.listGoals().then(r => { state.goals = r.goals || []; renderApp(); })
+      .catch(e => console.warn('Goals load failed:', e));
+  }
   function toggleTheme() {
     state.theme = state.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = state.theme;
@@ -171,6 +176,7 @@
   loadMilestones();
   loadCustomFields();
   loadTemplates();
+  loadGoals();
   // Light polling keeps the notification bell fresh without SSE/websockets,
   // which are impractical on shared cPanel hosting.
   setInterval(loadNotifications, 60000);
@@ -181,6 +187,7 @@
   window.pmLoadMilestones = () => loadMilestones();
   window.pmLoadCustomFields = () => loadCustomFields();
   window.pmLoadTemplates = () => loadTemplates();
+  window.pmLoadGoals = () => loadGoals();
   window.pmToggleTheme = () => toggleTheme();
   window.pmToggleDensity = () => toggleDensity();
 
@@ -354,6 +361,7 @@
       ['list', 'List', 'list'], ['checklist', 'My tasks', 'checkSquare'],
       ['calendar', 'Calendar', 'calendar'], ['timeline', 'Timeline', 'gantt'],
       ['workload', 'Workload', 'users'], ['activity', 'Activity', 'activity'],
+      ['goals', 'Goals', 'target'],
     ];
     for (const [k, l, ic] of views) add(`Go to ${l}`, ic, () => { state.view = k; persist(); renderApp(); }, 'View');
     add('New task', 'plus', () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); }, 'Create');
@@ -589,6 +597,7 @@
       case 'timeline':  content.appendChild(renderTimeline(tasks, handlers)); break;
       case 'workload':  content.appendChild(renderWorkload(tasks, handlers)); break;
       case 'activity':  content.appendChild(renderActivity(state.tasks, handlers)); break;
+      case 'goals':     content.appendChild(renderGoals(state.tasks, handlers)); break;
       default: content.appendChild(h('div', { class: 'empty' }, 'Unknown view'));
     }
     return main;
@@ -641,7 +650,7 @@
       onClick: () => { state.mobileSidebarOpen = !state.mobileSidebarOpen; renderApp(); },
     }, Icon('list', 16)));
     const proj = state.filterProject ? projectById(state.filterProject) : null;
-    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity' };
+    const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity', goals: 'Goals' };
     bar.appendChild(h('div', { class: 'crumbs' },
       h('span', null, 'Workspace'),
       Icon('chevronRight', 12, 1.75, 'sep'),
@@ -714,6 +723,7 @@
       ['timeline',  'Timeline',  'gantt'],
       ['workload',  'Workload',  'users'],
       ['activity',  'Activity',  'activity'],
+      ['goals',     'Goals',     'target'],
     ];
     const tabs = h('div', { class: 'view-tabs' });
     for (const [k, l, ic] of viewDef) {

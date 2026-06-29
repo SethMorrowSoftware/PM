@@ -211,9 +211,9 @@ impractical on shared cPanel hosting.)
 - New notification triggers/recipients go through `api/notify_lib.php`
   (`pm_notify`, `pm_task_recipients`, `pm_add_watchers`, `pm_resolve_mentions`).
 - Script load order now also includes `views/timeline.js`,
-  `views/admin-extras.js`, `views/workload.js`, `views/activity.js`, and
-  `views/command-palette.js` before `app.js`. The full v2 build spec is in
-  `docs/V2-CONTRACT.md`.
+  `views/admin-extras.js`, `views/workload.js`, `views/activity.js`,
+  `views/command-palette.js`, and `views/goals.js` before `app.js`. The full
+  v2 build spec is in `docs/V2-CONTRACT.md`.
 - **Command palette** (`views/command-palette.js`, `window.openCommandPalette`):
   ⌘K/Ctrl-K opens it; `app.js` supplies the item provider (`commandItems`).
   **Workload** + **Activity/audit** are top-level views; `api/activity.php`
