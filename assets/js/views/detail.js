@@ -38,6 +38,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
   const prevFocus = document.activeElement;
 
   let editingTitle = false;
+  let descEditing = false;
   let tempTitle = task.title;
   let newSubtaskText = '';
   let newCommentText = '';
@@ -353,8 +354,8 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Priority
     grid.appendChild(PropLabel('flag', 'Priority'));
     {
-      const btn = h('button', { class: 'chip' }, PriorityFlag(task.priority, true));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: canWrite ? null : { cursor: 'default' } }, PriorityFlag(task.priority, true));
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => priorityPickerContent(task.priority, async v => {
           try { const r = await onUpdate(task.id, { priority: v }); Object.assign(task, r.task || {priority:v}); redraw(); } catch(e){toast(e.message,'error');}
         }, close));
@@ -366,10 +367,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     grid.appendChild(PropLabel('users', 'Assignees'));
     {
       const names = task.assignees.map(id => (userById(id)?.name || '').split(' ')[0]).filter(Boolean).join(', ');
-      const btn = h('button', { class: 'chip', style: { padding: '3px 8px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { padding: '3px 8px', cursor: canWrite ? 'pointer' : 'default' } },
         AvatarStack(task.assignees, 3, 20),
         h('span', { style: { marginLeft: '4px' } }, names || 'Unassigned'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({close}) => assigneePickerContent(task.assignees, async uid => {
           const set = new Set(task.assignees);
           set.has(uid) ? set.delete(uid) : set.add(uid);
@@ -383,9 +384,9 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Due
     grid.appendChild(PropLabel('clock', 'Due date'));
     {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
-        task.due ? DueDate(task.due) : h('span', { style: { color: 'var(--fg-3)' } }, 'Set due date'));
-      btn.addEventListener('click', () => {
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
+        task.due ? DueDate(task.due) : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set due date' : 'No due date'));
+      if (canWrite) btn.addEventListener('click', () => {
         datePickerPopover(btn, task.due || '', async v => {
           const val = v || null;
           try { const r = await onUpdate(task.id, { due: val }); Object.assign(task, r.task || {due: val}); redraw(); } catch(err){toast(err.message,'error');}
@@ -397,10 +398,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Start date
     grid.appendChild(PropLabel('calendar', 'Start date'));
     {
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         task.start_date ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('calendar', 11), parseISO(task.start_date).toLocaleDateString('en', { month: 'short', day: 'numeric' }))
-                        : h('span', { style: { color: 'var(--fg-3)' } }, 'Set start date'));
-      btn.addEventListener('click', () => {
+                        : h('span', { style: { color: 'var(--fg-3)' } }, canWrite ? 'Set start date' : 'No start date'));
+      if (canWrite) btn.addEventListener('click', () => {
         datePickerPopover(btn, task.start_date || '', async v => {
           const val = v || null;
           try { const r = await onUpdate(task.id, { start_date: val }); Object.assign(task, r.task || {start_date: val}); refreshBoard(); redraw(); } catch(err){toast(err.message,'error');}
@@ -414,10 +415,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     {
       const projMilestones = (window.state.milestones || []).filter(m => m.project_id == null || m.project_id == task.project);
       const current = (window.state.milestones || []).find(m => m.id == task.milestone_id);
-      const btn = h('button', { class: 'chip', style: { fontSize: '11.5px' } },
+      const btn = h('button', { class: 'chip', disabled: !canWrite, style: { fontSize: '11.5px', cursor: canWrite ? 'pointer' : 'default' } },
         current ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px' } }, Icon('target', 11), current.name)
                 : h('span', { style: { color: 'var(--fg-3)' } }, 'No milestone'));
-      btn.addEventListener('click', () => {
+      if (canWrite) btn.addEventListener('click', () => {
         openPopover(btn, ({ close }) => {
           const wrap = h('div');
           wrap.appendChild(h('div', { class: 'popover-header' }, 'Milestone'));
@@ -454,20 +455,24 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     {
       const wrap = h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } });
       task.labels.forEach(l => wrap.appendChild(Tag(l)));
-      const add = h('button', { class: 'chip', style: { fontSize: '11.5px' } }, Icon('plus', 11), ' Add label');
-      add.addEventListener('click', () => {
-        openPopover(add, ({close}) => labelPickerContent(task.labels, async lid => {
-          const set = new Set(task.labels);
-          set.has(lid) ? set.delete(lid) : set.add(lid);
-          const arr = [...set];
-          try { const r = await onUpdate(task.id, { labels: arr }); Object.assign(task, r.task || {labels: arr}); redraw(); } catch(e){toast(e.message,'error');}
-        }, close, {
-          keepOpen: true,
-          scopeProjectId: task.project,
-          onCreateLabel: window.pmCreateLabelFromPicker,
-        }));
-      });
-      wrap.appendChild(add);
+      if (canWrite) {
+        const add = h('button', { class: 'chip', style: { fontSize: '11.5px' } }, Icon('plus', 11), ' Add label');
+        add.addEventListener('click', () => {
+          openPopover(add, ({close}) => labelPickerContent(task.labels, async lid => {
+            const set = new Set(task.labels);
+            set.has(lid) ? set.delete(lid) : set.add(lid);
+            const arr = [...set];
+            try { const r = await onUpdate(task.id, { labels: arr }); Object.assign(task, r.task || {labels: arr}); redraw(); } catch(e){toast(e.message,'error');}
+          }, close, {
+            keepOpen: true,
+            scopeProjectId: task.project,
+            onCreateLabel: window.pmCreateLabelFromPicker,
+          }));
+        });
+        wrap.appendChild(add);
+      } else if (!task.labels.length) {
+        wrap.appendChild(h('span', { style: { color: 'var(--fg-3)', fontSize: '11.5px' } }, 'No labels'));
+      }
       grid.appendChild(wrap);
     }
 
@@ -475,13 +480,13 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     grid.appendChild(PropLabel('zap', 'Estimate'));
     {
       const input = h('input', {
-        type: 'text', placeholder: '—', value: task.estimate || '',
+        type: 'text', placeholder: '—', value: task.estimate || '', disabled: !canWrite,
         style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '4px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none', width: '100px' },
-        onBlur: async e => {
+        onBlur: canWrite ? async e => {
           const v = e.target.value.trim() || null;
           if (v === (task.estimate || null)) return;
           try { const r = await onUpdate(task.id, { estimate: v }); Object.assign(task, r.task || {estimate:v}); } catch(err){toast(err.message,'error');}
-        },
+        } : null,
       });
       grid.appendChild(h('div', null, input));
     }
@@ -502,27 +507,76 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       return wsec;
     })());
 
-    // Description
-    body.appendChild(h('div', { style: { marginTop: '22px' } },
-      h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '8px' } }, 'Description'),
-      (() => {
+    // Description — Markdown-rendered by default; click (or Edit) swaps to the
+    // textarea editor; blur/save persists and swaps back to the rendered view.
+    body.appendChild((() => {
+      const dsec = h('div', { style: { marginTop: '22px' } });
+      const editable = canWrite;
+      // Header with an inline Edit affordance (only while showing rendered text).
+      const header = h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' } },
+        h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600' } }, 'Description'),
+        (editable && !descEditing && (task.description || '').trim())
+          ? h('button', { class: 'btn btn-ghost', style: { fontSize: '11px', padding: '2px 6px' },
+              onClick: () => { descEditing = true; redraw(); } }, Icon('edit', 12), ' Edit')
+          : null,
+      );
+      dsec.appendChild(header);
+
+      if (editable && descEditing) {
         const ta = h('textarea', {
-          placeholder: 'Add a description...',
+          placeholder: 'Add a description… (Markdown supported)',
           value: task.description || '',
           style: {
             width: '100%', minHeight: '70px', resize: 'vertical',
-            background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px',
+            background: 'var(--bg-3)', border: '1px solid var(--acc-border)', borderRadius: '8px',
             padding: '12px', fontSize: '13.5px', color: 'var(--fg-1)', lineHeight: '1.55', outline: 'none',
           },
+          onKeydown: e => { if (e.key === 'Escape') { e.preventDefault(); descEditing = false; redraw(); } },
           onBlur: async e => {
             const v = e.target.value;
-            if (v === (task.description || '')) return;
-            try { const r = await onUpdate(task.id, { description: v }); Object.assign(task, r.task || {description:v}); } catch(err){toast(err.message,'error');}
+            descEditing = false;
+            if (v !== (task.description || '')) {
+              try { const r = await onUpdate(task.id, { description: v }); Object.assign(task, r.task || {description:v}); }
+              catch(err){toast(err.message,'error');}
+            }
+            redraw();
           },
         });
-        return ta;
-      })(),
-    ));
+        dsec.appendChild(ta);
+        // Focus into the editor once it's mounted (after this redraw paints).
+        setTimeout(() => { if (document.body.contains(ta)) { ta.focus(); const n = ta.value.length; try { ta.setSelectionRange(n, n); } catch (_) {} } }, 0);
+      } else if ((task.description || '').trim()) {
+        const md = renderMarkdown(task.description);
+        if (editable) {
+          md.setAttribute('role', 'button');
+          md.setAttribute('tabindex', '0');
+          md.setAttribute('title', 'Click to edit');
+          md.style.cursor = 'text';
+          md.style.padding = '12px';
+          md.style.border = '1px solid var(--line)';
+          md.style.borderRadius = '8px';
+          md.style.background = 'var(--bg-3)';
+          md.addEventListener('click', () => { descEditing = true; redraw(); });
+          md.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); descEditing = true; redraw(); } });
+        }
+        dsec.appendChild(md);
+      } else {
+        // Empty: muted placeholder. Opens the editor when writable.
+        const ph = h('div', {
+          style: { fontSize: '13px', color: 'var(--fg-3)', padding: editable ? '12px' : '0', fontStyle: 'italic',
+            cursor: editable ? 'text' : 'default',
+            border: editable ? '1px dashed var(--line)' : 'none', borderRadius: '8px' },
+        }, editable ? 'Add a description…' : 'No description');
+        if (editable) {
+          ph.setAttribute('role', 'button');
+          ph.setAttribute('tabindex', '0');
+          ph.addEventListener('click', () => { descEditing = true; redraw(); });
+          ph.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); descEditing = true; redraw(); } });
+        }
+        dsec.appendChild(ph);
+      }
+      return dsec;
+    })());
 
     // Dependencies
     body.appendChild((() => {
@@ -535,7 +589,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         const isBlocked = kind === 'blocked_by' && t.status !== 'done';
         const pill = h('span', { class: 'dep-pill' + (isBlocked ? ' blocked' : '') },
           miniTaskChip(t),
-          h('button', {
+          canWrite ? h('button', {
             class: 'icon-btn sm', title: 'Remove dependency', style: { marginLeft: '4px' },
             onClick: async () => {
               // blocked_by: this task depends on t. blocks: t depends on this task.
@@ -547,7 +601,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
                 refreshBoard();
               } catch (e) { toast(e.message, 'error'); }
             },
-          }, Icon('x', 11)),
+          }, Icon('x', 11)) : null,
         );
         // Make the chip open the task it points to. Navigate via the URL hash
         // so app.js's own hashchange listener opens it (renderApp/state are
@@ -570,7 +624,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
 
       // Add blocker
       const addBtn = h('button', { class: 'chip', style: { fontSize: '11.5px', marginBottom: '12px' } }, Icon('gitBranch', 11), ' Add blocker');
-      addBtn.addEventListener('click', () => {
+      if (canWrite) addBtn.addEventListener('click', () => {
         openPopover(addBtn, ({ close }) => {
           const wrap = h('div');
           const input = h('input', { placeholder: 'Search tasks…', value: newBlockerQuery, autofocus: true });
@@ -610,7 +664,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
           return wrap;
         });
       });
-      dsec.appendChild(addBtn);
+      if (canWrite) dsec.appendChild(addBtn);
 
       // Blocks
       dsec.appendChild(h('div', { style: { fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, 'Blocks'));
@@ -639,7 +693,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       if (timeData && entries.length) {
         const myId = window.state.me?.id;
         for (const en of entries) {
-          const canDelete = window.state.me?.is_admin || (en.user && en.user.id === myId);
+          const canDelete = canWrite && (window.state.me?.is_admin || (en.user && en.user.id === myId));
           list.appendChild(h('div', { class: 'time-entry' },
             en.user ? Avatar(en.user, 20) : h('span', { class: 'avatar', style: { width: '20px', height: '20px' } }, '?'),
             h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, fmtMinutes(en.minutes)),
