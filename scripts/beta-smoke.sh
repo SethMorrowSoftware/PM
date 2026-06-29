@@ -29,5 +29,9 @@ rg -q "renderTimeline" assets/js/app.js
 rg -q "openNotifications" assets/js/app.js
 rg -q "ThemeToggle" assets/js/app.js
 rg -q "renderAdminExtras" assets/js/app.js
+# v2.2 surface
+rg -q "renderWorkload" assets/js/app.js
+rg -q "renderActivity" assets/js/app.js
+rg -q "openCmd|openCommandPalette" assets/js/app.js
 
 echo "beta-smoke: OK"

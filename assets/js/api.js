@@ -116,6 +116,14 @@ const API = {
 
   // ---- misc ----
   listActivity()            { return this.get('activity.php'); },
+  activityLog(opts = {}) {
+    const p = new URLSearchParams();
+    for (const k of ['limit', 'offset', 'user_id', 'task_id', 'action', 'q']) {
+      if (opts[k] != null && opts[k] !== '') p.set(k, opts[k]);
+    }
+    const qs = p.toString();
+    return this.get('activity.php' + (qs ? '?' + qs : ''));
+  },
   listUsers()               { return this.get('users.php'); },
   listSavedViews()          { return this.get('saved_views.php'); },
   createSavedView(data)     { return this.post('saved_views.php', data); },
