@@ -6,7 +6,7 @@
  *   - static assets (css/js/svg/fonts): stale-while-revalidate.
  * Bump CACHE to force a clean sweep on a deploy.
  */
-const CACHE = 'ctt-cache-v2';
+const CACHE = 'ctt-cache-v3';
 const SHELL = ['index.html', 'manifest.json', 'assets/icon.svg', 'assets/favicon.svg'];
 
 self.addEventListener('install', (e) => {
@@ -37,8 +37,13 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(req)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          // Only cache a real, same-origin 200 as the offline shell. Caching a
+          // redirect (302 to login) or an error page would poison the fallback
+          // and serve that instead of index.html on the next offline load.
+          if (res && res.ok && res.type === 'basic') {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          }
           return res;
         })
         .catch(() => caches.match(req).then((r) => r || caches.match('index.html')))

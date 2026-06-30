@@ -96,18 +96,20 @@ function pm_resolve_mentions(string $text): array {
  */
 function pm_run_due_sweep(): void {
     try {
-        // Throttle: at most once per ~5 minutes per deployment.
-        $last = pm_fetch_one("SELECT value FROM app_settings WHERE name = 'notify.last_sweep'");
+        // Throttle: at most once per ~5 minutes per deployment. The claim must be
+        // atomic — a read-check-then-write lets two concurrent requests both pass
+        // the window and run the sweep together, double-sending reminders and
+        // firing due_soon automations twice. A conditional UPDATE serialized by
+        // the row lock guarantees exactly one winner per window.
         $now = time();
-        if ($last && is_numeric(trim((string)$last['value'], '"'))) {
-            $ts = (int)trim((string)$last['value'], '"');
-            if ($now - $ts < 300) return;
-        }
-        pm_exec(
-            "INSERT INTO app_settings (name, value) VALUES ('notify.last_sweep', ?)
-             ON DUPLICATE KEY UPDATE value = VALUES(value)",
-            [json_encode($now)]
+        pm_exec("INSERT IGNORE INTO app_settings (name, value) VALUES ('notify.last_sweep', '0')");
+        $claimed = pm_exec(
+            "UPDATE app_settings SET value = ?
+             WHERE name = 'notify.last_sweep'
+               AND ? - CAST(TRIM('\"' FROM value) AS UNSIGNED) >= 300",
+            [json_encode($now), $now]
         );
+        if ($claimed < 1) return; // another request already swept inside this window
     } catch (Throwable $_) { return; /* if settings table is unavailable, skip */ }
 
     // 1) Explicit reminders that have come due.

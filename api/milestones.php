@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
 
 $method = pm_method();
@@ -43,29 +44,44 @@ function pm_milestone_get(int $id): ?array {
 }
 
 if ($method === 'GET' && $id === null) {
-    pm_require_auth();
+    $uid = pm_require_auth();
     // Aggregate task/done counts via a single LEFT JOIN + GROUP BY (no N+1).
     $projectId = pm_int_param('project_id');
+    $where = [];
+    $params = [];
+    if ($projectId !== null) { $where[] = 'm.project_id = ?'; $params[] = $projectId; }
+    // Restrict to readable projects so a non-member can't enumerate a private
+    // project's milestones (names/due/completion). null = no private projects or
+    // admin -> no restriction.
+    if (function_exists('pm_readable_project_ids')) {
+        $readable = pm_readable_project_ids($uid);
+        if ($readable !== null) {
+            if (!$readable) { pm_json(['milestones' => []]); }
+            $ph = implode(',', array_fill(0, count($readable), '?'));
+            $where[] = "m.project_id IN ($ph)";
+            foreach ($readable as $r) $params[] = (int)$r;
+        }
+    }
+    $whereSql = $where ? (' WHERE ' . implode(' AND ', $where)) : '';
     $sql = 'SELECT m.id, m.project_id, m.name, m.description, m.due, m.status, m.sort_order,
                    COUNT(t.id) AS task_count,
                    SUM(CASE WHEN t.status = \'done\' THEN 1 ELSE 0 END) AS done_count
             FROM milestones m
-            LEFT JOIN tasks t ON t.milestone_id = m.id';
-    $params = [];
-    if ($projectId !== null) {
-        $sql .= ' WHERE m.project_id = ?';
-        $params[] = $projectId;
-    }
-    $sql .= ' GROUP BY m.id, m.project_id, m.name, m.description, m.due, m.status, m.sort_order
-              ORDER BY m.sort_order, m.id';
+            LEFT JOIN tasks t ON t.milestone_id = m.id'
+        . $whereSql
+        . ' GROUP BY m.id, m.project_id, m.name, m.description, m.due, m.status, m.sort_order
+            ORDER BY m.sort_order, m.id';
     $rows = pm_fetch_all($sql, $params);
     pm_json(['milestones' => array_map('pm_milestone_shape', $rows)]);
 }
 
 if ($method === 'GET' && $id !== null) {
-    pm_require_auth();
+    $uid = pm_require_auth();
     $out = pm_milestone_get($id);
     if (!$out) pm_error('Not found', 404);
+    if (function_exists('pm_can_read_project') && !pm_can_read_project($uid, (int)$out['project_id'])) {
+        pm_error('Not found', 404);
+    }
     pm_json(['milestone' => $out]);
 }
 

@@ -69,9 +69,9 @@ function renderList(tasks, handlers) {
     const dir = ls.sortDir === 'desc' ? -1 : 1;
     groups.forEach(g => g.tasks.sort((a, b) => {
       let r = 0;
-      if (ls.sortBy === 'priority') r = a.priority - b.priority;
+      if (ls.sortBy === 'priority') r = (a.priority ?? 99) - (b.priority ?? 99);
       else if (ls.sortBy === 'due') r = new Date(a.due || '9999') - new Date(b.due || '9999');
-      else if (ls.sortBy === 'title') r = a.title.localeCompare(b.title);
+      else if (ls.sortBy === 'title') r = (a.title || '').localeCompare(b.title || '');
       return r * dir;
     }));
     groups = groups.filter(g => g.tasks.length);

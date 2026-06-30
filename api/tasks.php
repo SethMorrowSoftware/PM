@@ -338,7 +338,9 @@ function pm_search_tasks(): void {
     $q = trim((string)pm_param('q', ''));
     if ($q !== '') {
         $where[] = '(t.title LIKE ? OR t.ref LIKE ?)';
-        $like = '%' . $q . '%';
+        // Escape LIKE metacharacters so a query like "100%" or "a_b" matches
+        // literally instead of acting as a wildcard (or forcing a full scan).
+        $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $q) . '%';
         $whereParams[] = $like; $whereParams[] = $like;
     }
     $project = pm_int_param('project');
@@ -1119,6 +1121,11 @@ function pm_bulk_update_tasks(): void {
         $proj = pm_fetch_one('SELECT id, archived FROM projects WHERE id = ?', [$np]);
         if (!$proj) pm_error('Invalid project', 409);
         if (!empty($proj['archived'])) pm_error('Cannot move tasks into an archived project', 409);
+        // Mirror the single-task path: forbid bulk-moving tasks INTO a private
+        // project the caller can't write to (the single-task update guards this).
+        if (function_exists('pm_can_write_project') && !pm_can_write_project(pm_current_user_id() ?? 0, $np)) {
+            pm_error('Forbidden', 403);
+        }
     }
     // Pre-validate the assignees list once so a bogus id doesn't get caught
     // mid-loop after we've already written to N tasks.

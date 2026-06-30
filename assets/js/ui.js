@@ -69,7 +69,17 @@ const daysFromNow = (n) => {
   d.setDate(d.getDate() + n);
   return ymd(d);
 };
-const parseISO = s => { if (!s) return null; const d = new Date(s); d.setHours(0,0,0,0); return d; };
+// Parse a date string to a *local* midnight Date. A bare "YYYY-MM-DD" is built
+// from its parts so it lands on that exact calendar day in the viewer's TZ —
+// `new Date('2026-06-30')` would parse as UTC midnight and then floor back a day
+// for anyone west of UTC (the whole point of the local-wall-clock rule above).
+const parseISO = s => {
+  if (!s) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s).trim());
+  const d = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date(s);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
 
 // -------- Avatars --------
 function Avatar(user, size = 22, ring = false) {

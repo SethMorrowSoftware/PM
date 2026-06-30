@@ -179,8 +179,16 @@
   loadTemplates();
   loadGoals();
   // Light polling keeps the notification bell fresh without SSE/websockets,
-  // which are impractical on shared cPanel hosting.
-  setInterval(loadNotifications, 60000);
+  // which are impractical on shared cPanel hosting. Skip the tick while the user
+  // is mid-interaction in a modal or the task drawer: loadNotifications() calls
+  // renderApp(), which replaces the root and would wipe unsaved input (new-task
+  // fields, profile/settings forms, a comment being typed). The bell catches up
+  // on the next poll once the surface is closed.
+  setInterval(() => {
+    if (state.openTaskId || state.quickAddOpen || state.profileOpen ||
+        state.settingsOpen || state.shortcutsOpen) return;
+    loadNotifications();
+  }, 60000);
 
   // Exposed so view modules / the task drawer can refresh shared data.
   window.pmRefreshTasks = () => refreshTasks();
@@ -317,9 +325,9 @@
     const q = state.search.trim().toLowerCase();
     return state.tasks.filter(t => {
       if (state.filterProject && t.project != state.filterProject) return false;
-      if (state.filterAssignee && !t.assignees.includes(state.filterAssignee)) return false;
-      if (state.filterLabels.length && !state.filterLabels.some(l => t.labels.includes(l))) return false;
-      if (q && !t.title.toLowerCase().includes(q) && !t.ref.toLowerCase().includes(q)) return false;
+      if (state.filterAssignee && !(t.assignees || []).includes(state.filterAssignee)) return false;
+      if (state.filterLabels.length && !state.filterLabels.some(l => (t.labels || []).includes(l))) return false;
+      if (q && !(t.title || '').toLowerCase().includes(q) && !(t.ref || '').toLowerCase().includes(q)) return false;
       return true;
     });
   }
