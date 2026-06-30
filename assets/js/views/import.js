@@ -136,7 +136,8 @@
 
     const rows = matrix.slice(1).map((cells) => {
       const title = String(cellAt(cells, 'title') || '').trim();
-      const projectId = resolveProject(cellAt(cells, 'project'));
+      const projRaw = String(cellAt(cells, 'project') || '').trim();
+      const projectId = resolveProject(projRaw);
       const status = resolveStatus(cellAt(cells, 'status'));
       const priority = resolvePriority(cellAt(cells, 'priority'));
       const dueRaw = String(cellAt(cells, 'due') || '').trim();
@@ -147,6 +148,13 @@
       const lbl = resolveNames(cellAt(cells, 'labels'), labels);
 
       const warnings = [];
+      // A given-but-unrecognized project name would otherwise be silently
+      // coerced to the active filter / first project. Surface it so the row
+      // isn't filed into the wrong board without the user noticing.
+      if (projRaw && !(st.projects || []).some(p => norm(p.name) === norm(projRaw))) {
+        const into = (st.projects || []).find(p => p.id == projectId);
+        warnings.push(`project "${projRaw}" not found — importing into "${into ? into.name : '?'}"`);
+      }
       if (dueRaw && !due) warnings.push(`due "${dueRaw}" is not YYYY-MM-DD`);
       if (asg.unknown.length) warnings.push('unknown assignee: ' + asg.unknown.join(', '));
       if (lbl.unknown.length) warnings.push('unknown label: ' + lbl.unknown.join(', '));

@@ -90,7 +90,10 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
   for (let i = 13; i >= 0; i--) dayKeys.push(daysFromNow(-i));
   const startThisWeek = daysFromNow(-6); // inclusive 7-day window ending today
   const startLastWeek = daysFromNow(-13);
-  const endLastWeek   = daysFromNow(-7);
+  // Exclusive upper bound for last week. Must be startThisWeek (-6) so last week
+  // also spans a full 7 days [-13 .. -7]; using -7 made it 6 days and biased
+  // every week-over-week delta upward even when activity was flat.
+  const endLastWeek   = daysFromNow(-6);
 
   // Per-day created / completed counts over the 14-day window.
   const createdByDay   = Object.fromEntries(dayKeys.map(k => [k, 0]));

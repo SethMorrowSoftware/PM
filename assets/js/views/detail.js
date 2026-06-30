@@ -914,8 +914,13 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             try {
               const text = newSubtaskText.trim();
               const r = await onAddSubtask(task.id, text);
+              // onAddSubtask (app's addSubtask) already appends the new row to the
+              // shared state task object — which is this same `task` reference — so
+              // only push when it isn't already present, else it double-counts.
               task.subtasks = task.subtasks || [];
-              task.subtasks.push(r.subtask);
+              if (r.subtask && !task.subtasks.some(s => s.id === r.subtask.id)) {
+                task.subtasks.push(r.subtask);
+              }
               newSubtaskText = '';
               redraw();
             } catch(err){toast(err.message,'error');}

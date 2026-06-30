@@ -97,6 +97,21 @@ if ($method === 'PATCH' && $id !== null) {
     $body = pm_body();
     $f = []; $p = [];
 
+    // A select field must always keep at least one option (mirror the POST
+    // invariant), whether this patch changes field_type, options, or neither.
+    $existing = pm_fetch_one('SELECT field_type, options_json FROM custom_fields WHERE id = ?', [$id]);
+    if (!$existing) pm_error('Not found', 404);
+    $effType = array_key_exists('field_type', $body) ? (string)$body['field_type'] : (string)$existing['field_type'];
+    if ($effType === 'select') {
+        if (array_key_exists('options', $body)) {
+            $effOpts = pm_cf_normalize_options($body['options']);
+        } else {
+            $dec = json_decode((string)($existing['options_json'] ?? ''), true);
+            $effOpts = is_array($dec) ? $dec : [];
+        }
+        if (count($effOpts) === 0) pm_error('Select fields require at least one option');
+    }
+
     if (array_key_exists('name', $body)) {
         $name = trim((string)$body['name']);
         if ($name === '') pm_error('Name cannot be empty');

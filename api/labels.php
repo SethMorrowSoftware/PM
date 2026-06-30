@@ -1,7 +1,8 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 $id = pm_int_param('id');
@@ -71,6 +72,21 @@ if ($method === 'GET' && $id === null) {
         // (either global project_id IS NULL or matching project_id).
         $where[]  = '(l.project_id IS NULL OR l.project_id = ?)';
         $params[] = $projectId;
+    }
+    // Don't expose project-scoped labels for private projects the caller can't
+    // read. Global labels (project_id IS NULL) stay visible to everyone. null =
+    // no private projects or admin -> no restriction.
+    if (function_exists('pm_readable_project_ids')) {
+        $readable = pm_readable_project_ids($uid);
+        if ($readable !== null) {
+            if ($readable) {
+                $ph = implode(',', array_fill(0, count($readable), '?'));
+                $where[] = "(l.project_id IS NULL OR l.project_id IN ($ph))";
+                foreach ($readable as $r) $params[] = (int)$r;
+            } else {
+                $where[] = 'l.project_id IS NULL';
+            }
+        }
     }
     $sql = 'SELECT l.id, l.name, l.color, l.project_id, l.archived, COUNT(tl.task_id) AS usage_count
             FROM labels l

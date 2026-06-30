@@ -49,9 +49,14 @@ if ($method === 'GET') {
         [$taskId]
     );
 
+    // Hide neighbors that live in a private project the caller can't read, so a
+    // dependency edge never leaks a task they otherwise have no access to.
+    $readable = function (array $r) use ($uid) {
+        return !function_exists('pm_can_read_task') || pm_can_read_task($uid, (int)$r['id']);
+    };
     pm_json([
-        'blocked_by' => array_map('pm_dep_task_mini', $blockedBy),
-        'blocks'     => array_map('pm_dep_task_mini', $blocks),
+        'blocked_by' => array_map('pm_dep_task_mini', array_values(array_filter($blockedBy, $readable))),
+        'blocks'     => array_map('pm_dep_task_mini', array_values(array_filter($blocks, $readable))),
     ]);
 }
 
@@ -66,6 +71,11 @@ if ($method === 'POST') {
     if ($dependsOnId === null) pm_error('depends_on_id required');
     if ($dependsOnId === $taskId) pm_error('A task cannot depend on itself');
     $dependsOnId = pm_dep_require_task($dependsOnId);
+    // The target must be readable too, or a writer on an open task could link to
+    // (and thereby leak the ref/title/status of) a task in a private project.
+    if (function_exists('pm_can_read_task') && !pm_can_read_task($uid, $dependsOnId)) {
+        pm_error('Forbidden', 403);
+    }
 
     // Cycle check: adding taskId -> dependsOnId means taskId waits on
     // dependsOnId. If, starting from dependsOnId and following its own
