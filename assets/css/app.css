@@ -1021,3 +1021,15 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   border-radius: var(--radius-sm); padding: 1px 5px;
 }
 .md strong { font-weight: var(--fw-semibold, 600); color: var(--fg-0); }
+
+/* private-project lock in the sidebar */
+.nav-proj .proj-lock { color: var(--fg-3); flex-shrink: 0; margin-left: 2px; }
+
+/* attachment image thumbnails */
+.att-thumb {
+  width: 64px; height: 64px; object-fit: cover; display: block;
+  border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--bg-3); cursor: zoom-in;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.att-thumb:hover { border-color: var(--acc-border); }

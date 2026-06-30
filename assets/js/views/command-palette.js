@@ -181,7 +181,14 @@
       setActive(0, false);
     }
 
+    let queryGen = 0;
     function query(value) {
+      const gen = ++queryGen;
+      const apply = (arr) => {
+        if (gen !== queryGen || closed) return; // ignore stale / late responses
+        items = (Array.isArray(arr) ? arr : []).slice(0, MAX_RESULTS);
+        renderResults();
+      };
       let result;
       try {
         result = getItems(value);
@@ -189,8 +196,12 @@
         if (window.console) console.error('[command-palette] getItems threw', err);
         result = [];
       }
-      items = (Array.isArray(result) ? result : []).slice(0, MAX_RESULTS);
-      renderResults();
+      // getItems may return an array (sync) or a Promise (e.g. server search).
+      if (result && typeof result.then === 'function') {
+        result.then(apply).catch(() => apply([]));
+      } else {
+        apply(result);
+      }
     }
 
     input.addEventListener('input', () => {

@@ -57,6 +57,14 @@ const API = {
 
   // ---- tasks ----
   listTasks()               { return this.get('tasks.php'); },
+  getTask(id)               { return this.get(`tasks.php?id=${id}`); },
+  searchTasks(opts = {}) {
+    const p = new URLSearchParams({ search: '1' });
+    for (const k of ['q', 'project', 'status', 'assignee', 'label', 'limit', 'offset']) {
+      if (opts[k] != null && opts[k] !== '') p.set(k, opts[k]);
+    }
+    return this.get('tasks.php?' + p.toString());
+  },
   createTask(data)          { return this.post('tasks.php', data); },
   updateTask(id, patch)     { return this.patch(`tasks.php?id=${id}`, patch); },
   deleteTask(id)            { return this.del(`tasks.php?id=${id}`); },

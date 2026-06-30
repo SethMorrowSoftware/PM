@@ -33,6 +33,14 @@ if (isset($_GET['bulk'])) {
     pm_error('Method not allowed', 405);
 }
 
+// Server-side search / filter / pagination — scales past the bulk list. Returns
+// a light shape (enough for a results list); opening a result fetches the full
+// task via ?id=N. Access-aware (readable projects only).
+if (isset($_GET['search'])) {
+    if ($method === 'GET') pm_search_tasks();
+    pm_error('Method not allowed', 405);
+}
+
 // Sub-routes
 if ($id !== null && isset($_GET['comments'])) {
     // Reaction toggle lives under the comments namespace so it travels with the
@@ -307,6 +315,72 @@ function pm_validate_assignee_ids(array $assigneeIds): array {
         pm_error('One or more assignees are invalid', 409);
     }
     return $clean;
+}
+
+function pm_search_tasks(): void {
+    $uid = pm_current_user_id() ?? 0;
+    $joins = '';
+    $joinParams = [];
+    $where = [];
+    $whereParams = [];
+
+    // Access: restrict to readable projects (null = no restriction).
+    if (function_exists('pm_readable_project_ids')) {
+        $readable = pm_readable_project_ids($uid);
+        if ($readable !== null) {
+            if (!$readable) { pm_json(['tasks' => [], 'total' => 0, 'has_more' => false]); return; }
+            $ph = implode(',', array_fill(0, count($readable), '?'));
+            $where[] = "t.project_id IN ($ph)";
+            foreach ($readable as $r) $whereParams[] = (int)$r;
+        }
+    }
+
+    $q = trim((string)pm_param('q', ''));
+    if ($q !== '') {
+        $where[] = '(t.title LIKE ? OR t.ref LIKE ?)';
+        $like = '%' . $q . '%';
+        $whereParams[] = $like; $whereParams[] = $like;
+    }
+    $project = pm_int_param('project');
+    if ($project) { $where[] = 't.project_id = ?'; $whereParams[] = $project; }
+    $status = trim((string)pm_param('status', ''));
+    if ($status !== '' && pm_is_valid_status($status)) { $where[] = 't.status = ?'; $whereParams[] = $status; }
+    $assignee = pm_int_param('assignee');
+    if ($assignee) { $joins .= ' JOIN task_assignees ta ON ta.task_id = t.id AND ta.user_id = ?'; $joinParams[] = $assignee; }
+    $label = pm_int_param('label');
+    if ($label) { $joins .= ' JOIN task_labels tl ON tl.task_id = t.id AND tl.label_id = ?'; $joinParams[] = $label; }
+
+    $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+    $limit  = max(1, min(100, (int)pm_int_param('limit', 25)));
+    $offset = max(0, (int)pm_int_param('offset', 0));
+    $allParams = array_merge($joinParams, $whereParams);
+
+    $countRow = pm_fetch_one("SELECT COUNT(DISTINCT t.id) AS c FROM tasks t$joins $whereSql", $allParams);
+    $total = (int)($countRow['c'] ?? 0);
+
+    // $limit/$offset are validated ints — safe to inline.
+    $rows = pm_fetch_all(
+        "SELECT DISTINCT t.* FROM tasks t$joins $whereSql ORDER BY t.id DESC LIMIT $limit OFFSET $offset",
+        $allParams
+    );
+    $tasks = array_map(function ($t) use ($uid) {
+        $tid = (int)$t['id'];
+        return [
+            'id'        => $tid,
+            'ref'       => $t['ref'],
+            'title'     => $t['title'],
+            'status'    => $t['status'],
+            'priority'  => (int)$t['priority'],
+            'project'   => (int)$t['project_id'],
+            'due'       => $t['due'],
+            'assignees' => array_map(fn($r) => (int)$r['user_id'],
+                pm_fetch_all('SELECT user_id FROM task_assignees WHERE task_id = ?', [$tid])),
+            'can_write' => function_exists('pm_can_write_project')
+                ? pm_can_write_project($uid, (int)$t['project_id']) : true,
+        ];
+    }, $rows);
+
+    pm_json(['tasks' => $tasks, 'total' => $total, 'has_more' => ($offset + count($rows)) < $total]);
 }
 
 function pm_create_task(): void {

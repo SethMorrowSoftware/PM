@@ -90,16 +90,23 @@ function renderList(tasks, handlers) {
     const visibleIds = [];
     groups.forEach(g => { if (!ls.collapsed[g.key]) g.tasks.forEach(t => visibleIds.push(t.id)); });
 
-    // select-all reflects the currently visible (expanded) rows
-    const allSelected = visibleIds.length > 0 && visibleIds.every(id => isSelected(id));
-    const someSelected = visibleIds.some(id => isSelected(id));
+    // select-all only governs writable rows: bulk actions mutate, and the server
+    // would 403 read-only tasks, so don't auto-select them (avoids silent failures).
+    const writable = (t) => t.can_write !== false;
+    const selectableIds = [];
+    groups.forEach(g => { if (!ls.collapsed[g.key]) g.tasks.forEach(t => { if (writable(t)) selectableIds.push(t.id); }); });
+
+    // select-all reflects the currently visible (expanded) writable rows
+    const allSelected = selectableIds.length > 0 && selectableIds.every(id => isSelected(id));
+    const someSelected = selectableIds.some(id => isSelected(id));
 
     const selectAll = h('input', {
       type: 'checkbox', checked: allSelected, title: 'Select all',
+      disabled: selectableIds.length === 0,
       onClick: e => e.stopPropagation(),
       onChange: e => {
-        if (e.target.checked) { const s = selSet(); visibleIds.forEach(id => s.add(id)); ls.selected = [...s]; }
-        else { const s = selSet(); visibleIds.forEach(id => s.delete(id)); ls.selected = [...s]; }
+        if (e.target.checked) { const s = selSet(); selectableIds.forEach(id => s.add(id)); ls.selected = [...s]; }
+        else { const s = selSet(); selectableIds.forEach(id => s.delete(id)); ls.selected = [...s]; }
         redraw();
       },
     });
@@ -228,6 +235,7 @@ function renderList(tasks, handlers) {
     const groupStatus = ls.groupBy === 'status' ? g.key : undefined;
 
     rowEls.forEach((rowEl) => {
+      // Read-only rows have no grip (and must not reorder — server would 403).
       const grip = rowEl.querySelector('.row-grip');
       if (!grip) return;
       makeDraggable(rowEl, {
@@ -316,10 +324,13 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
   const subDone = sub.filter(s => s.done).length;
   const pct = sub.length ? (subDone / sub.length) * 100 : (task.status === 'done' ? 100 : 0);
   const done = task.status === 'done';
+  // Viewer in a private project: read-only. Default (undefined/true) = full access.
+  const canWrite = task.can_write !== false;
 
   const row = h('div', {
-    class: 'list-row' + (done ? ' done' : ''),
+    class: 'list-row' + (done ? ' done' : '') + (canWrite ? '' : ' readonly'),
     tabindex: '0', role: 'row', dataset: { id: String(task.id) },
+    'aria-readonly': canWrite ? null : 'true',
     onClick: () => onOpen(task.id),
     onKeydown: (e) => {
       if (e.key === 'Enter') { e.preventDefault(); onOpen(task.id); }
@@ -327,10 +338,11 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
     },
   });
 
-  // helper: open a picker anchored on the clicked cell without opening the task
+  // helper: open a picker anchored on the clicked cell without opening the task.
+  // Read-only rows render the same cell content but never wire the picker.
   const cell = (cls, child, openPicker) => {
     const c = h('div', { class: cls });
-    if (openPicker) {
+    if (openPicker && canWrite) {
       c.style.cursor = 'pointer';
       c.addEventListener('click', (e) => { e.stopPropagation(); openPicker(c); });
     }
@@ -339,16 +351,21 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
   };
 
   // ----- check cell: drag grip + selection checkbox + status toggle -----
+  // The grip is omitted entirely when read-only so wireReorder skips the row.
   const checkCell = h('div', { class: 'col-check hstack', style: { gap: '6px' }, onClick: (e) => e.stopPropagation() },
-    h('span', { class: 'row-grip', title: 'Drag to reorder',
-      style: { display: 'inline-flex', color: 'var(--fg-4)', cursor: 'grab' },
-      onClick: (e) => e.stopPropagation() }, Icon('grip', 13)),
+    canWrite
+      ? h('span', { class: 'row-grip', title: 'Drag to reorder',
+          style: { display: 'inline-flex', color: 'var(--fg-4)', cursor: 'grab' },
+          onClick: (e) => e.stopPropagation() }, Icon('grip', 13))
+      : h('span', { style: { display: 'inline-flex', width: '13px' } }),
     h('input', {
       type: 'checkbox', checked: selected,
       onClick: e => e.stopPropagation(),
       onChange: e => onSelect?.(!!e.target.checked, e),
     }),
-    h('div', { title: 'Toggle done', onClick: (e) => { e.stopPropagation(); onToggleStatus(task.id); } }, Checkbox(done)),
+    canWrite
+      ? h('div', { title: 'Toggle done', onClick: (e) => { e.stopPropagation(); onToggleStatus(task.id); } }, Checkbox(done))
+      : h('div', { title: done ? 'Done' : 'Not done', style: { display: 'inline-flex', cursor: 'default' }, onClick: (e) => e.stopPropagation() }, Checkbox(done)),
   );
   row.appendChild(checkCell);
 
@@ -415,14 +432,16 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
   row.appendChild(h('div', { class: 'col-actions', style: { textAlign: 'right' } },
     h('button', {
       class: 'icon-btn sm', title: 'More',
-      onClick: (e) => { e.stopPropagation(); openMoreMenu(e.currentTarget, task, saveTask, onOpen); },
+      onClick: (e) => { e.stopPropagation(); openMoreMenu(e.currentTarget, task, saveTask, onOpen, canWrite); },
     }, Icon('more', 14))));
 
   return row;
 }
 
 // Per-row "more" menu: open, watch/unwatch, milestone, delete.
-function openMoreMenu(anchor, task, saveTask, onOpen) {
+// On read-only rows (canWrite === false) the mutating items (set milestone,
+// delete) are hidden; non-mutating ones (open, watch) stay.
+function openMoreMenu(anchor, task, saveTask, onOpen, canWrite = true) {
   const me = window.state.me && window.state.me.id;
   const watching = Array.isArray(task.watchers) && me != null && task.watchers.includes(me);
   openPopover(anchor, ({ close }) => {
@@ -431,7 +450,7 @@ function openMoreMenu(anchor, task, saveTask, onOpen) {
       onSelect: () => { close(); onOpen(task.id); },
       leading: Icon('eye', 14), children: h('span', null, 'Open task'),
     }));
-    wrap.appendChild(PopoverItem({
+    if (canWrite) wrap.appendChild(PopoverItem({
       onSelect: () => { close(); openPopover(anchor, ({ close: c2 }) =>
         milestonePickerContent(task, task.milestone_id ?? null, (mid) => saveTask(task.id, { milestone_id: mid }), c2)); },
       leading: Icon('target', 14), children: h('span', null, 'Set milestone'),
@@ -447,7 +466,7 @@ function openMoreMenu(anchor, task, saveTask, onOpen) {
       leading: Icon(watching ? 'bellOff' : 'eye', 14),
       children: h('span', null, watching ? 'Unwatch' : 'Watch'),
     }));
-    wrap.appendChild(PopoverItem({
+    if (canWrite) wrap.appendChild(PopoverItem({
       onSelect: async () => {
         close();
         const ok = await confirmDialog({

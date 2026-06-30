@@ -60,6 +60,7 @@
       kanban:    { swimlane: 'none' },
       timeline:  { zoom: 'week', cursor: ymd(today()) },
       activity:  { user_id: null, action: '', q: '' },
+      dashboard: { customizing: false },
     },
   };
   // Apply persisted theme immediately (index.html also sets it pre-paint).
@@ -374,16 +375,32 @@
     add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
     for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
 
-    const cmdMatches = q ? cmds.filter(c => c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q)) : cmds.slice(0, 9);
-    const pool = q
-      ? state.tasks.filter(t => t.title.toLowerCase().includes(q) || (t.ref || '').toLowerCase().includes(q))
-      : state.tasks.slice(0, 6);
-    const taskMatches = pool.slice(0, 8).map(t => ({
+    const taskItem = (t) => ({
       label: t.title, sublabel: t.ref, icon: 'checkSquare',
       hint: projectById(t.project)?.name || '',
-      run: () => { state.openTaskId = t.id; setTaskHash(t.id); renderApp(); },
-    }));
-    return [...cmdMatches, ...taskMatches];
+      run: () => openTaskById(t.id),
+    });
+    if (!q) {
+      // Instant on open: commands + recently-loaded tasks (no server round-trip).
+      return [...cmds.slice(0, 9), ...state.tasks.slice(0, 6).map(taskItem)];
+    }
+    const cmdMatches = cmds.filter(c => c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q));
+    // Server-backed task search so the palette can jump to ANY task, not just
+    // the bulk-loaded set (scales past a few thousand). Falls back to local.
+    return API.searchTasks({ q: query, limit: 8 })
+      .then(r => [...cmdMatches, ...((r.tasks || []).map(taskItem))])
+      .catch(() => {
+        const pool = state.tasks.filter(t => t.title.toLowerCase().includes(q) || (t.ref || '').toLowerCase().includes(q)).slice(0, 8);
+        return [...cmdMatches, ...pool.map(taskItem)];
+      });
+  }
+  async function openTaskById(id) {
+    // Server search can return a task not in the bulk-loaded set — fetch it on
+    // demand so the drawer can render it.
+    if (!state.tasks.some(t => t.id === id)) {
+      try { const r = await API.getTask(id); if (r.task) state.tasks = [r.task, ...state.tasks]; } catch (_) { /* ignore */ }
+    }
+    state.openTaskId = id; setTaskHash(id); renderApp();
   }
   function openCmd() {
     if (typeof openCommandPalette === 'function') openCommandPalette(commandItems);
@@ -492,8 +509,10 @@
       },
         h('span', { class: 'proj-dot', style: { background: p.color } }),
         h('span', { class: 'proj-name' }, p.name),
+        p.visibility === 'private' ? Icon('lock', 11, 1.75, 'proj-lock') : null,
         h('span', { class: 'proj-count' }, String(count)),
       );
+      if (p.visibility === 'private') row.title = 'Private project — members only';
       projSection.appendChild(row);
     }
     scroll.appendChild(projSection);

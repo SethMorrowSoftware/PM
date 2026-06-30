@@ -934,38 +934,86 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '10px' }
     }, `Attachments · ${attachments == null ? '…' : attachments.length}`));
 
+    // Delete control for an attachment row (respects read-only gating).
+    const attDeleteBtn = (a) => canWrite ? h('button', {
+      class: 'btn btn-ghost',
+      style: { fontSize: '11px', padding: '2px 6px' },
+      onClick: async () => {
+        const ok = await confirmDialog({ title: 'Delete attachment?', message: a.name, confirmText: 'Delete', danger: true });
+        if (!ok) return;
+        try {
+          await API.deleteAttachment(a.id);
+          attachments = attachments.filter(x => x.id !== a.id);
+          window._pmAttachmentsCache[task.id] = attachments;
+          task.attachments = Math.max(0, (task.attachments || 0) - 1);
+          redraw();
+        } catch (e) { toast(e.message, 'error'); }
+      },
+    }, 'Delete') : null;
+
     const attList = h('div', { style: { display: 'grid', gap: '8px' } });
     if (attachments && attachments.length) {
+      // Images (excluding SVG) get a clickable thumbnail that opens a lightbox.
+      // The list of images is captured so the lightbox can offer prev/next.
+      const images = attachments.filter(isImageAttachment);
       attachments.forEach((a) => {
-        attList.appendChild(h('div', {
-          style: {
-            display: 'flex', gap: '8px', alignItems: 'center',
-            background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px', padding: '8px 10px',
-          },
-        },
-          Icon('paperclip', 13),
-          h('a', {
-            href: a.download_url,
-            style: { color: 'var(--fg-1)', fontSize: '12.5px', textDecoration: 'none', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-            title: a.name,
-          }, a.name),
-          h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, formatBytes(a.size)),
-          canWrite ? h('button', {
-            class: 'btn btn-ghost',
-            style: { fontSize: '11px', padding: '2px 6px' },
-            onClick: async () => {
-              const ok = await confirmDialog({ title: 'Delete attachment?', message: a.name, confirmText: 'Delete', danger: true });
-              if (!ok) return;
-              try {
-                await API.deleteAttachment(a.id);
-                attachments = attachments.filter(x => x.id !== a.id);
-                window._pmAttachmentsCache[task.id] = attachments;
-                task.attachments = Math.max(0, (task.attachments || 0) - 1);
-                redraw();
-              } catch (e) { toast(e.message, 'error'); }
+        if (isImageAttachment(a)) {
+          const idx = images.indexOf(a);
+          const thumb = h('img', {
+            class: 'att-thumb',
+            src: `api/attachments.php?id=${a.id}&download=1`,
+            alt: a.name,
+            loading: 'lazy',
+            // Fallback inline styles in case the att-thumb class is not yet styled.
+            style: {
+              width: '64px', height: '64px', objectFit: 'cover', borderRadius: '8px',
+              border: '1px solid var(--line)', background: 'var(--bg-4)', cursor: 'zoom-in',
+              flex: '0 0 auto', display: 'block',
             },
-          }, 'Delete') : null,
-        ));
+          });
+          const openIt = () => openAttachmentLightbox(images, idx);
+          const thumbBtn = h('button', {
+            class: 'att-thumb-btn',
+            title: 'Preview ' + a.name,
+            'aria-label': 'Preview ' + a.name,
+            style: { padding: 0, border: 'none', background: 'transparent', cursor: 'zoom-in', lineHeight: 0, flex: '0 0 auto' },
+            onClick: openIt,
+          }, thumb);
+          attList.appendChild(h('div', {
+            style: {
+              display: 'flex', gap: '10px', alignItems: 'center',
+              background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px', padding: '8px 10px',
+            },
+          },
+            thumbBtn,
+            h('div', { style: { flex: 1, minWidth: 0, display: 'grid', gap: '2px' } },
+              h('a', {
+                href: a.download_url,
+                style: { color: 'var(--fg-1)', fontSize: '12.5px', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' },
+                title: a.name,
+              }, a.name),
+              h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, formatBytes(a.size)),
+            ),
+            attDeleteBtn(a),
+          ));
+        } else {
+          // Non-image attachment: unchanged row.
+          attList.appendChild(h('div', {
+            style: {
+              display: 'flex', gap: '8px', alignItems: 'center',
+              background: 'var(--bg-3)', border: '1px solid var(--line)', borderRadius: '8px', padding: '8px 10px',
+            },
+          },
+            Icon('paperclip', 13),
+            h('a', {
+              href: a.download_url,
+              style: { color: 'var(--fg-1)', fontSize: '12.5px', textDecoration: 'none', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+              title: a.name,
+            }, a.name),
+            h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, formatBytes(a.size)),
+            attDeleteBtn(a),
+          ));
+        }
       });
     } else if (attachments && attachments.length === 0) {
       attList.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No attachments yet.'));
@@ -1313,6 +1361,127 @@ function formatBytes(n) {
   let v = Math.max(0, Number(n) || 0);
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// True for image attachments we can preview inline. SVG is excluded — the
+// backend never serves it inline (it forces octet-stream), and it carries an
+// XSS surface, so it stays a plain download row like other files.
+function isImageAttachment(a) {
+  const m = String((a && a.mime) || '').toLowerCase();
+  return m.startsWith('image/') && m !== 'image/svg+xml';
+}
+
+// Full-screen lightbox for image attachments. `images` is the ordered list of
+// previewable attachments; `startIndex` is the one that was clicked. Closes on
+// overlay click, the close button, and Escape; restores focus to whatever was
+// focused before it opened. Prev/next cycle through `images`.
+function openAttachmentLightbox(images, startIndex) {
+  if (!Array.isArray(images) || !images.length) return;
+  let i = Math.max(0, Math.min(startIndex || 0, images.length - 1));
+  const prevFocus = document.activeElement;
+
+  const scrim = h('div', {
+    class: 'scrim',
+    style: { zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+    onClick: (e) => { if (e.target === scrim) close(); },
+  });
+
+  const dialog = h('div', {
+    role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Image preview', tabindex: '-1',
+    style: {
+      position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center',
+      gap: '10px', maxWidth: '92vw', maxHeight: '92vh',
+    },
+  });
+
+  const img = h('img', {
+    alt: '',
+    style: {
+      maxWidth: '92vw', maxHeight: '78vh', objectFit: 'contain',
+      borderRadius: '8px', background: 'var(--bg-4)', boxShadow: '0 10px 40px rgba(0,0,0,0.45)',
+    },
+  });
+
+  const caption = h('a', {
+    target: '_blank', rel: 'noopener',
+    style: { color: 'var(--fg-1)', fontSize: '13px', textDecoration: 'none', maxWidth: '80vw', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  });
+
+  const counter = h('span', { style: { color: 'var(--fg-3)', fontSize: '12px' } });
+
+  const downloadLink = h('a', {
+    class: 'btn btn-ghost', style: { fontSize: '12px' },
+  }, Icon('download', 13), ' Download');
+
+  const closeBtn = h('button', {
+    class: 'icon-btn', title: 'Close', 'aria-label': 'Close preview',
+    style: { position: 'absolute', top: '-6px', right: '-6px', background: 'var(--bg-2)', borderRadius: '999px' },
+    onClick: close,
+  }, Icon('x', 16));
+
+  const multi = images.length > 1;
+  const prevBtn = multi ? h('button', {
+    class: 'icon-btn', title: 'Previous image', 'aria-label': 'Previous image',
+    style: { background: 'var(--bg-2)', borderRadius: '999px' },
+    onClick: () => { i = (i - 1 + images.length) % images.length; show(); },
+  }, Icon('chevronLeft', 18)) : null;
+  const nextBtn = multi ? h('button', {
+    class: 'icon-btn', title: 'Next image', 'aria-label': 'Next image',
+    style: { background: 'var(--bg-2)', borderRadius: '999px' },
+    onClick: () => { i = (i + 1) % images.length; show(); },
+  }, Icon('chevronRight', 18)) : null;
+
+  const stage = h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+    prevBtn, img, nextBtn);
+
+  const bar = h('div', { class: 'hstack', style: { gap: '12px', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' } },
+    caption, multi ? counter : null, downloadLink);
+
+  dialog.appendChild(closeBtn);
+  dialog.appendChild(stage);
+  dialog.appendChild(bar);
+  scrim.appendChild(dialog);
+
+  function show() {
+    const a = images[i];
+    img.src = `api/attachments.php?id=${a.id}&inline=1`;
+    img.alt = a.name || 'Image attachment';
+    caption.textContent = a.name || 'Image';
+    caption.href = `api/attachments.php?id=${a.id}&inline=1`;
+    downloadLink.href = `api/attachments.php?id=${a.id}&download=1`;
+    downloadLink.setAttribute('download', a.name || '');
+    if (multi) counter.textContent = `${i + 1} / ${images.length}`;
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+    if (multi && e.key === 'ArrowLeft') { e.preventDefault(); i = (i - 1 + images.length) % images.length; show(); return; }
+    if (multi && e.key === 'ArrowRight') { e.preventDefault(); i = (i + 1) % images.length; show(); return; }
+    if (e.key === 'Tab') {
+      // Minimal focus trap: keep Tab within the dialog.
+      const items = [...dialog.querySelectorAll('a[href], button:not([disabled])')].filter(el => el.offsetParent !== null);
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) { e.preventDefault(); last.focus(); }
+      } else {
+        if (active === last || !dialog.contains(active)) { e.preventDefault(); first.focus(); }
+      }
+    }
+  }
+
+  function close() {
+    document.removeEventListener('keydown', onKey, true);
+    scrim.remove();
+    if (prevFocus && typeof prevFocus.focus === 'function') { try { prevFocus.focus(); } catch (_) {} }
+  }
+
+  // Capture phase so Escape closes the lightbox before the drawer's own handler.
+  document.addEventListener('keydown', onKey, true);
+  show();
+  document.body.appendChild(scrim);
+  setTimeout(() => { try { (closeBtn || dialog).focus(); } catch (_) {} }, 0);
 }
 
 window.renderTaskDetail = renderTaskDetail;
