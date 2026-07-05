@@ -68,6 +68,13 @@ function renderList(tasks, handlers) {
 
     const dir = ls.sortDir === 'desc' ? -1 : 1;
     groups.forEach(g => g.tasks.sort((a, b) => {
+      // Completed tasks always sink to the bottom of their group (except when
+      // grouping BY status, where the Done group holds them anyway) so showing
+      // them doesn't push active work off the top.
+      if (ls.groupBy !== 'status') {
+        const ad = a.status === 'done' ? 1 : 0, bd = b.status === 'done' ? 1 : 0;
+        if (ad !== bd) return ad - bd;
+      }
       let r = 0;
       if (ls.sortBy === 'manual') r = (a.position ?? 0) - (b.position ?? 0);
       else if (ls.sortBy === 'priority') r = (a.priority ?? 99) - (b.priority ?? 99);
