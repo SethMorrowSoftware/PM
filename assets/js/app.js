@@ -60,6 +60,9 @@
       return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
     })(),
     density: localStorage.getItem('pm_density') === 'compact' ? 'compact' : 'comfortable',
+    // monday-style default: finished work stays off the task boards until you
+    // ask for it (toggle pill in the filter bar / command palette). '0' = shown.
+    hideDone: localStorage.getItem('pm_hidedone') !== '0',
     // view-local UI state, LIFTED here so it survives full re-renders
     ui: {
       list:      { groupBy: 'status', sortBy: 'priority', sortDir: 'asc', collapsed: {}, selected: [] },
@@ -351,9 +354,16 @@
   }
 
   // ----- filter logic -----
-  function filteredTasks() {
+  // Views where completed tasks are suppressed while state.hideDone is on. The
+  // aggregate views (dashboard, workload, activity, goals, my-tasks) always see
+  // everything — their stats and history need the done rows.
+  const HIDE_DONE_VIEWS = ['kanban', 'list', 'calendar', 'timeline'];
+
+  function filteredTasks(opts = {}) {
     const q = state.search.trim().toLowerCase();
+    const hideDone = state.hideDone && !opts.includeDone && HIDE_DONE_VIEWS.includes(state.view);
     return state.tasks.filter(t => {
+      if (hideDone && t.status === 'done') return false;
       if (state.filterProject && t.project != state.filterProject) return false;
       if (state.filterAssignee && !(t.assignees || []).includes(state.filterAssignee)) return false;
       if (state.filterLabels.length && !state.filterLabels.some(l => (t.labels || []).includes(l))) return false;
@@ -413,6 +423,8 @@
     add('Export tasks to CSV', 'download', () => exportTasksCsv(filteredTasks()), 'Export');
     add('Import tasks from CSV', 'upload', () => { if (typeof openImport === 'function') openImport(); }, 'Import');
     add('Clear filters', 'x', () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }, 'Filter');
+    add(state.hideDone ? 'Show completed tasks' : 'Hide completed tasks', 'checkCircle',
+      () => { state.hideDone = !state.hideDone; persist(); renderApp(); }, 'Filter');
     add(state.density === 'compact' ? 'Comfortable density' : 'Compact density', 'list', () => toggleDensity(), 'Display');
     add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
     for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
@@ -690,6 +702,11 @@
         persist(); renderApp();
       },
       activity: state.activity,
+      // Kanban: how many done tasks are filtered out (so its Done column can
+      // say so instead of looking empty), and a way to reveal them.
+      hiddenDoneCount: (state.view === 'kanban' && state.hideDone)
+        ? filteredTasks({ includeDone: true }).filter(t => t.status === 'done').length : 0,
+      onShowDone: () => { state.hideDone = false; persist(); renderApp(); },
     };
 
     switch (state.view) {
@@ -893,6 +910,21 @@
         ));
       });
       bar.appendChild(lblBtn);
+
+      // Completed-tasks visibility (monday-style: hidden by default). Only on
+      // the views where hiding applies; a preference, so Clear doesn't reset it.
+      if (HIDE_DONE_VIEWS.includes(state.view)) {
+        const doneN = filteredTasks({ includeDone: true }).filter(t => t.status === 'done').length;
+        bar.appendChild(h('button', {
+          class: 'filter-pill',
+          'aria-pressed': state.hideDone ? 'true' : 'false',
+          title: state.hideDone
+            ? `${doneN} completed task${doneN === 1 ? '' : 's'} hidden — click to show`
+            : 'Completed tasks are shown — click to hide them',
+          onClick: () => { state.hideDone = !state.hideDone; persist(); renderApp(); },
+        }, Icon(state.hideDone ? 'eye' : 'checkCircle', 12),
+           state.hideDone ? ` Show done (${doneN}) ` : ' Hide done '));
+      }
 
       // Clear
       if (state.filterProject || state.filterAssignee || state.filterLabels.length) {
@@ -2208,6 +2240,7 @@
       localStorage.setItem('pm_project',  state.filterProject  == null ? 'null' : String(state.filterProject));
       localStorage.setItem('pm_assignee', state.filterAssignee == null ? 'null' : String(state.filterAssignee));
       localStorage.setItem('pm_labels',   JSON.stringify(state.filterLabels || []));
+      localStorage.setItem('pm_hidedone', state.hideDone ? '1' : '0');
     } catch (e) {
       console.warn('Filter persistence failed:', e);
     }

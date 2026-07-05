@@ -3,7 +3,7 @@
 // On drop we compute a fractional `position` between the two neighbour cards and
 // persist via handlers.onReorder(id, {status, position}). View-local drag state
 // lives on window.state.ui.kanban so it survives renderApp() re-renders.
-function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder }) {
+function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder, hiddenDoneCount = 0, onShowDone }) {
   const root = h('div', { class: 'kb-board' });
 
   // View-local state survives re-render (lead provides state.ui.kanban).
@@ -78,11 +78,16 @@ function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder }) {
   for (const s of STATUSES) {
     const colTasks = cols[s.id];
 
+    // With hide-done on, the Done column's cards are filtered out upstream —
+    // surface the real count so the column doesn't read as empty.
+    const colHidden = s.id === 'done' ? hiddenDoneCount : 0;
     const wipCount = h('span', {
       class: 'mono',
       style: { fontSize: '11px', color: 'var(--fg-3)', background: 'var(--bg-3)', padding: '1px 6px', borderRadius: '4px' },
-      title: colTasks.length + ' task' + (colTasks.length === 1 ? '' : 's'),
-    }, String(colTasks.length));
+      title: colHidden
+        ? `${colHidden} completed task${colHidden === 1 ? '' : 's'} (hidden)`
+        : colTasks.length + ' task' + (colTasks.length === 1 ? '' : 's'),
+    }, String(colTasks.length + colHidden));
 
     const head = h('div', { class: 'kb-col-head' },
       h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: s.color } }),
@@ -174,7 +179,16 @@ function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder }) {
       });
     }
 
-    if (colTasks.length === 0) {
+    if (colHidden > 0 && colTasks.length === 0) {
+      // Still a live drop target — dropping a card here completes it as usual.
+      body.appendChild(h('div', { style: { textAlign: 'center', padding: '22px 10px', color: 'var(--fg-4)', fontSize: '12px' } },
+        `${colHidden} completed hidden`,
+        h('button', {
+          style: { display: 'block', margin: '6px auto 0', color: 'var(--acc-1)', fontSize: '12px', cursor: 'pointer' },
+          onClick: () => onShowDone?.(),
+        }, 'Show completed'),
+      ));
+    } else if (colTasks.length === 0) {
       body.appendChild(h('div', { style: { textAlign: 'center', padding: '30px', color: 'var(--fg-4)', fontSize: '12px' } }, 'Drop tasks here'));
     }
     body.appendChild(h('button', {
