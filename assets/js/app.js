@@ -1288,10 +1288,61 @@
     frag.appendChild(scrim);
     frag.appendChild(modal);
 
+    // IntersectionObserver that keeps the left-rail nav in sync with the
+    // scrolled section; recreated each redraw, disconnected on close.
+    let settingsNavObserver = null;
+
     function close() {
       state.settingsOpen = false;
+      if (settingsNavObserver) { settingsNavObserver.disconnect(); settingsNavObserver = null; }
       scrim.remove();
       modal.remove();
+    }
+
+    // Build the left-rail section navigation from the sections actually present
+    // in `body` (each is a `.settings-section-head` with an <h3>). Clicking a
+    // rail item smooth-scrolls its section to the top of the body; an
+    // IntersectionObserver highlights the section currently in view. Because it
+    // reads the live DOM, the rail always matches what rendered (admin vs not).
+    function buildSettingsNav(rail, body) {
+      if (settingsNavObserver) { settingsNavObserver.disconnect(); settingsNavObserver = null; }
+      rail.replaceChildren();
+      const heads = [...body.querySelectorAll('.settings-section-head')];
+      if (heads.length < 2) return;                 // nothing worth navigating
+      const iconMap = [
+        ['project access', 'lock'], ['projects', 'folder'], ['labels', 'tag'],
+        ['slack', 'message'], ['recurring', 'clock'], ['team', 'users'],
+        ['milestone', 'target'], ['custom', 'settings'], ['template', 'flag'],
+        ['automation', 'zap'],
+      ];
+      const tabByTarget = {};
+      heads.forEach((head, i) => {
+        if (!head.id) head.id = 'set-sec-' + i;
+        const h3 = head.querySelector('h3');
+        const label = h3 ? h3.textContent.trim() : ('Section ' + (i + 1));
+        const key = label.toLowerCase();
+        let ic = 'settings';
+        for (const [kw, name] of iconMap) { if (key.includes(kw)) { ic = name; break; } }
+        const tab = h('button', {
+          class: 'settings-tab' + (i === 0 ? ' active' : ''),
+          role: 'tab', type: 'button',
+          onClick: () => head.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+        }, Icon(ic, 15), h('span', null, label));
+        tab.dataset.target = head.id;
+        tabByTarget[head.id] = tab;
+        rail.appendChild(tab);
+      });
+      // Highlight the section whose head sits in the top slice of the body.
+      settingsNavObserver = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          const tab = tabByTarget[e.target.id];
+          if (!tab) continue;
+          rail.querySelectorAll('.settings-tab.active').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+        }
+      }, { root: body, rootMargin: '0px 0px -80% 0px', threshold: 0 });
+      heads.forEach(hd => settingsNavObserver.observe(hd));
     }
 
     function resetForm(p = null) {
@@ -1690,8 +1741,15 @@
         h('button', { class: 'btn btn-ghost', onClick: close }, Icon('x', 14), ' Close'),
       ));
 
+      // Two-pane layout: a left rail that jump-navigates between sections and the
+      // scrolling body. The rail is (re)built from the sections actually present
+      // once the body is populated (buildSettingsNav, at the end of redraw).
+      const layout = h('div', { class: 'settings-layout' });
+      const rail = h('div', { class: 'settings-tabs', role: 'tablist', 'aria-label': 'Settings sections' });
       const body = h('div', { class: 'settings-body' });
-      modal.appendChild(body);
+      layout.appendChild(rail);
+      layout.appendChild(body);
+      modal.appendChild(layout);
 
       const head = h('div', { class: 'settings-section-head' },
         h('div', null,
@@ -2064,6 +2122,8 @@
         try { model.adminExtras.appendChild(renderAdminExtras()); } catch (e) { /* optional panel */ }
       }
       if (model.adminExtras) body.appendChild(model.adminExtras);
+
+      buildSettingsNav(rail, body);
     }
 
     refreshProjects();
