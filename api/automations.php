@@ -7,8 +7,9 @@
 // is invoked synchronously from tasks.php / notify_lib.php — not from here.
 
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 require_once __DIR__ . '/automations_lib.php'; // also provides PM_AUTOMATION_* vocab
 
@@ -128,15 +129,27 @@ function pm_automation_project_id($raw): ?int {
     return $pid;
 }
 
-// ---- GET (list) — any authenticated user --------------------------------
+// ---- GET (list) — any authenticated user; readable projects only ---------
 if ($method === 'GET' && $id === null) {
-    $rows = pm_fetch_all('SELECT * FROM automation_rules ORDER BY project_id IS NOT NULL, project_id, id');
+    // Hide rules scoped to private projects the caller can't read (their
+    // names/conditions/notify text can be sensitive); global rules stay visible.
+    $params = [];
+    $where = function_exists('pm_readable_project_where')
+        ? pm_readable_project_where($uid, 'project_id', $params) : '';
+    $sql = 'SELECT * FROM automation_rules'
+        . ($where !== '' ? " WHERE $where" : '')
+        . ' ORDER BY project_id IS NOT NULL, project_id, id';
+    $rows = pm_fetch_all($sql, $params);
     pm_json(['rules' => array_map('pm_automation_shape', $rows)]);
 }
 
 if ($method === 'GET' && $id !== null) {
     $r = pm_fetch_one('SELECT * FROM automation_rules WHERE id = ?', [$id]);
     if (!$r) pm_error('Not found', 404);
+    if ($r['project_id'] !== null && function_exists('pm_can_read_project')
+        && !pm_can_read_project($uid, (int)$r['project_id'])) {
+        pm_error('Not found', 404);
+    }
     pm_json(['rule' => pm_automation_shape($r)]);
 }
 

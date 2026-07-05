@@ -11,8 +11,9 @@
 // (templates are shared team config, like recurring rules).
 
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 $id     = pm_int_param('id');
@@ -85,7 +86,15 @@ function pm_template_scope_exists(?int $projectId): void {
 }
 
 if ($method === 'GET' && $id === null) {
-    $rows = pm_fetch_all('SELECT * FROM task_templates ORDER BY name');
+    // Hide templates scoped to private projects the caller can't read; global
+    // (project_id IS NULL) templates stay visible.
+    $params = [];
+    $where = function_exists('pm_readable_project_where')
+        ? pm_readable_project_where($uid, 'project_id', $params) : '';
+    $sql = 'SELECT * FROM task_templates'
+        . ($where !== '' ? " WHERE $where" : '')
+        . ' ORDER BY name';
+    $rows = pm_fetch_all($sql, $params);
     pm_json(['templates' => array_map('pm_template_shape', $rows)]);
 }
 

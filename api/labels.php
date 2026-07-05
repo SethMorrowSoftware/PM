@@ -33,6 +33,15 @@ function pm_label_scope_exists(?int $projectId): void {
     if (!$proj) pm_error('Invalid project_id');
 }
 
+// Writes to a label scoped to a PRIVATE project require write access to that
+// project (open/global labels are unrestricted, preserving legacy behavior).
+function pm_label_require_write(int $uid, ?int $projectId): void {
+    if ($projectId === null) return;
+    if (function_exists('pm_can_write_project') && !pm_can_write_project($uid, $projectId)) {
+        pm_error('Forbidden', 403);
+    }
+}
+
 function pm_label_dup_exists(string $name, ?int $projectId, ?int $exceptId = null): bool {
     $dupWhere = 'LOWER(name) = LOWER(?) AND archived = 0 AND ';
     $dupParams = [trim($name)];
@@ -106,6 +115,7 @@ if ($method === 'POST' && $id === null && $action !== 'merge') {
     if (!in_array($color, PM_LABEL_COLORS, true)) pm_error('Invalid color. Use one of: ' . implode(', ', PM_LABEL_COLORS));
 
     pm_label_scope_exists($projectId);
+    pm_label_require_write($uid, $projectId);
     if (pm_label_dup_exists($name, $projectId)) {
         pm_error('A label with that name already exists in this scope', 409);
     }
@@ -160,7 +170,13 @@ if ($method === 'PATCH' && $id !== null) {
         $nextName = trim((string)$body['name']);
         if ($nextName === '') pm_error('Name cannot be empty');
     }
+    // Guard both the current scope (can you touch this label at all?) and the
+    // target scope (can you move it into that project?) for private projects.
+    $curScope = pm_fetch_one('SELECT project_id FROM labels WHERE id = ?', [$id]);
+    if (!$curScope) pm_error('Not found', 404);
+    pm_label_require_write($uid, isset($curScope['project_id']) && $curScope['project_id'] !== null ? (int)$curScope['project_id'] : null);
     $nextScope = pm_label_effective_scope($id, $body);
+    pm_label_require_write($uid, $nextScope);
     if ($nextName !== null && pm_label_dup_exists($nextName, $nextScope, $id)) {
         pm_error('A label with that name already exists in this scope', 409);
     }
@@ -202,6 +218,9 @@ if ($method === 'PATCH' && $id !== null) {
 }
 
 if ($method === 'DELETE' && $id !== null) {
+    $delScope = pm_fetch_one('SELECT project_id FROM labels WHERE id = ?', [$id]);
+    if (!$delScope) pm_error('Not found', 404);
+    pm_label_require_write($uid, isset($delScope['project_id']) && $delScope['project_id'] !== null ? (int)$delScope['project_id'] : null);
     $force = !empty($_GET['force']);
     $useCount = (int)(pm_fetch_one('SELECT COUNT(*) AS c FROM task_labels WHERE label_id = ?', [$id])['c'] ?? 0);
     if ($useCount > 0 && !$force) {

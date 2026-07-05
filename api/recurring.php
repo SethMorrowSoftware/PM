@@ -7,8 +7,9 @@
 // list so the sidebar/settings view can surface them.
 
 require_once __DIR__ . '/bootstrap.php';
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
-pm_require_auth();
+$uid = pm_require_auth();
 
 $method = pm_method();
 $id     = pm_int_param('id');
@@ -111,6 +112,14 @@ function pm_recurring_spawn_now(array $rule): ?int {
     if (!$proj) return null;
     $prefix = $proj['key_prefix'] ?: pm_config()['project_key'];
 
+    // Next position for the project's 'todo' column so the initial instance
+    // lands at the end instead of colliding at position 0.
+    $posRow = pm_fetch_one(
+        'SELECT COALESCE(MAX(position),0) AS m FROM tasks WHERE project_id = ? AND status = ?',
+        [(int)$rule['project_id'], 'todo']
+    );
+    $position = (float)($posRow['m'] ?? 0) + 1;
+
     $tid = null;
     $attempts = 0;
     while (true) {
@@ -123,12 +132,12 @@ function pm_recurring_spawn_now(array $rule): ?int {
         $ref = $prefix . '-' . $nextRef;
         try {
             pm_exec(
-                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, estimate, recurring_rule_id, created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?,?)',
+                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, position, estimate, recurring_rule_id, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 [
                     $ref, (int)$rule['project_id'], 'todo',
                     $rule['title'], $rule['description'], (int)$rule['priority'],
-                    $scheduleFor, $rule['estimate'] ?: null, (int)$rule['id'], pm_current_user_id(),
+                    $scheduleFor, $position, $rule['estimate'] ?: null, (int)$rule['id'], pm_current_user_id(),
                 ]
             );
             $tid = pm_last_id();
@@ -269,13 +278,24 @@ function pm_recurring_save(array $input, ?int $existingId = null): int {
 }
 
 if ($method === 'GET' && $id === null) {
-    $rows = pm_fetch_all('SELECT * FROM recurring_rules ORDER BY project_id, id');
+    // Hide rules for private projects the caller can't read (rules always have a
+    // project, so global rows don't apply here → includeGlobal = false).
+    $params = [];
+    $where = function_exists('pm_readable_project_where')
+        ? pm_readable_project_where($uid, 'project_id', $params, false) : '';
+    $sql = 'SELECT * FROM recurring_rules'
+        . ($where !== '' ? " WHERE $where" : '')
+        . ' ORDER BY project_id, id';
+    $rows = pm_fetch_all($sql, $params);
     pm_json(['rules' => array_map('pm_recurring_shape', $rows)]);
 }
 
 if ($method === 'GET' && $id !== null) {
     $r = pm_fetch_one('SELECT * FROM recurring_rules WHERE id = ?', [$id]);
     if (!$r) pm_error('Not found', 404);
+    if (function_exists('pm_can_read_project') && !pm_can_read_project($uid, (int)$r['project_id'])) {
+        pm_error('Not found', 404);
+    }
     pm_json(['rule' => pm_recurring_shape($r)]);
 }
 

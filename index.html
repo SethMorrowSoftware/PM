@@ -3,7 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- Content-Security-Policy (defense-in-depth on top of the safe DOM builder /
+     Markdown renderer). 'unsafe-inline' scripts are needed for the pre-paint
+     theme script + SW registration below; the font origins are the only allowed
+     third parties. connect-src 'self' keeps XHR/fetch same-origin. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'" />
 <title>Castle Tech Tasks</title>
+<meta name="theme-color" content="#F6F8FB" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0B0F17" media="(prefers-color-scheme: dark)" />
 <meta name="theme-color" content="#0B0F17" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

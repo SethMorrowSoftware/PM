@@ -1,0 +1,16 @@
+# Runtime data — never commit uploaded files or rate-limit state.
+# (storage/.htaccess is kept so the deny rule ships with the repo.)
+storage/attachments/*
+storage/ratelimit/*
+!storage/.htaccess
+!storage/attachments/.htaccess
+
+# Local editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# NOTE: api/config.php is intentionally tracked as a placeholder template
+# (see CLAUDE.md). Do NOT commit real cPanel DB credentials into it — edit it
+# on the server after deploy, and keep the in-repo copy on placeholder values.

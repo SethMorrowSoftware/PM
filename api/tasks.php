@@ -365,7 +365,19 @@ function pm_search_tasks(): void {
         "SELECT DISTINCT t.* FROM tasks t$joins $whereSql ORDER BY t.id DESC LIMIT $limit OFFSET $offset",
         $allParams
     );
-    $tasks = array_map(function ($t) use ($uid) {
+
+    // Batch-load assignees for all result rows in ONE query (was an N+1 loop —
+    // up to `limit` extra queries per search) and bucket by task in PHP.
+    $assigneesByTask = [];
+    if ($rows) {
+        $rowIds = array_map(fn($r) => (int)$r['id'], $rows);
+        $ph = implode(',', array_fill(0, count($rowIds), '?'));
+        foreach (pm_fetch_all("SELECT task_id, user_id FROM task_assignees WHERE task_id IN ($ph)", $rowIds) as $r) {
+            $assigneesByTask[(int)$r['task_id']][] = (int)$r['user_id'];
+        }
+    }
+
+    $tasks = array_map(function ($t) use ($uid, $assigneesByTask) {
         $tid = (int)$t['id'];
         return [
             'id'        => $tid,
@@ -375,8 +387,7 @@ function pm_search_tasks(): void {
             'priority'  => (int)$t['priority'],
             'project'   => (int)$t['project_id'],
             'due'       => $t['due'],
-            'assignees' => array_map(fn($r) => (int)$r['user_id'],
-                pm_fetch_all('SELECT user_id FROM task_assignees WHERE task_id = ?', [$tid])),
+            'assignees' => $assigneesByTask[$tid] ?? [],
             'can_write' => function_exists('pm_can_write_project')
                 ? pm_can_write_project($uid, (int)$t['project_id']) : true,
         ];
@@ -617,6 +628,32 @@ function pm_update_task(int $id): void {
         }
     }
 
+    // When a task changes project, its milestone and project-scoped labels may
+    // no longer belong to the new project. If the caller didn't explicitly set
+    // them in this PATCH, detach the stale ones so the task doesn't keep a
+    // foreign milestone (corrupting that milestone's counts) or out-of-scope
+    // labels (which would 409 the next label edit). Global labels are kept.
+    if (array_key_exists('project', $body)) {
+        $newProjectId = (int)$body['project'];
+        if ($newProjectId !== (int)$t['project_id']) {
+            if (!array_key_exists('milestone_id', $body)) {
+                $curMs = pm_fetch_one('SELECT milestone_id FROM tasks WHERE id = ?', [$id]);
+                $curMsId = ($curMs && $curMs['milestone_id'] !== null) ? (int)$curMs['milestone_id'] : null;
+                if ($curMsId !== null) {
+                    $stillValid = pm_fetch_one('SELECT id FROM milestones WHERE id = ? AND project_id = ?', [$curMsId, $newProjectId]);
+                    if (!$stillValid) pm_exec('UPDATE tasks SET milestone_id = NULL WHERE id = ?', [$id]);
+                }
+            }
+            if (!(array_key_exists('labels', $body) && is_array($body['labels']))) {
+                pm_exec(
+                    'DELETE tl FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+                     WHERE tl.task_id = ? AND l.project_id IS NOT NULL AND l.project_id <> ?',
+                    [$id, $newProjectId]
+                );
+            }
+        }
+    }
+
     // Activity (light)
     if (isset($body['status']) && $body['status'] !== $t['status']) {
         pm_log_activity(pm_current_user_id(), $id, 'moved', $t['status'] . ' → ' . $body['status']);
@@ -635,7 +672,9 @@ function pm_update_task(int $id): void {
         $proj = pm_fetch_one('SELECT * FROM projects WHERE id = ?', [(int)$t['project_id']]);
         pm_slack_notify_task_event($t, $proj, 'task_completed', 'marked this task done');
         if (!empty($t['recurring_rule_id'])) {
-            pm_generate_next_recurring_task((int)$t['recurring_rule_id']);
+            // Pass the completed task id so generation only fires for the current
+            // tip of the chain (prevents duplicate spawns on reopen→re-complete).
+            pm_generate_next_recurring_task((int)$t['recurring_rule_id'], $id);
         }
     }
     if ($newlyAssigned) {
@@ -662,8 +701,8 @@ function pm_update_task(int $id): void {
     // task this one was blocking (it's now potentially unblocked).
     if ($prevStatus !== 'done' && $t['status'] === 'done') {
         try {
-            $body = pm_actor_name($actor) . ' completed ' . $t['ref'] . ' ' . $t['title'];
-            pm_notify_users(pm_task_recipients($id, $actor), $actor, $id, 'status', $body);
+            $doneBody = pm_actor_name($actor) . ' completed ' . $t['ref'] . ' ' . $t['title'];
+            pm_notify_users(pm_task_recipients($id, $actor), $actor, $id, 'status', $doneBody);
         } catch (Throwable $_) {}
         try { pm_notify_unblocked($id, $actor); } catch (Throwable $_) {}
     }
@@ -1060,14 +1099,16 @@ function pm_delete_comment(int $taskId, int $commentId): void {
 }
 
 function pm_notify_mentions(array $task, ?array $project, string $text): void {
-    preg_match_all('/@([A-Za-z0-9._-]{2,80})/', $text, $m);
-    $names = array_values(array_unique($m[1] ?? []));
-    if (!$names) return;
-    $hits = [];
-    foreach ($names as $n) {
-        $row = pm_fetch_one('SELECT id, name FROM users WHERE LOWER(name) = LOWER(?) OR LOWER(initials) = LOWER(?)', [$n, $n]);
-        if ($row) $hits[] = $row;
-    }
+    // Resolve mentioned users through the SAME parser the in-app notifications
+    // use (pm_resolve_mentions: full name or a unique first name, never bare
+    // initials) so a comment's Slack ping and its in-app 'mention' notifications
+    // target an identical set of people. Falls back to nothing if the lib is
+    // absent (guarded include model).
+    if (!function_exists('pm_resolve_mentions')) return;
+    $ids = pm_resolve_mentions($text);
+    if (!$ids) return;
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $hits = pm_fetch_all("SELECT id, name FROM users WHERE id IN ($ph)", array_map('intval', $ids));
     if (!$hits) return;
     $actor = pm_current_user();
     $who = $actor['name'] ?? 'Someone';
@@ -1157,6 +1198,15 @@ function pm_bulk_update_tasks(): void {
             $params[] = $id;
             pm_exec('UPDATE tasks SET ' . implode(', ', $fields) . ' WHERE id = ?', $params);
         }
+        // Log status transitions to the activity feed so bulk moves aren't
+        // invisible in the audit trail (bulk still intentionally skips the
+        // heavier notify/recurring/automation side-effects of the single path).
+        if (array_key_exists('status', $patch) && (string)$patch['status'] !== (string)$task['status']) {
+            pm_log_activity(pm_current_user_id(), $id, 'moved', $task['status'] . ' → ' . $patch['status']);
+            if ($patch['status'] === 'done') {
+                pm_log_activity(pm_current_user_id(), $id, 'completed', $task['title']);
+            }
+        }
         if (array_key_exists('labels', $patch) && is_array($patch['labels'])) {
             $labelProject = array_key_exists('project', $patch) ? (int)$patch['project'] : (int)$task['project_id'];
             $valid = pm_validate_label_ids_for_project($patch['labels'], $labelProject);
@@ -1167,6 +1217,23 @@ function pm_bulk_update_tasks(): void {
             pm_exec('DELETE FROM task_assignees WHERE task_id = ?', [$id]);
             foreach ($preValidatedAssignees as $uid) {
                 pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$id, (int)$uid]);
+            }
+        }
+        // Mirror the single-task path: when moving into a different project,
+        // detach a now-foreign milestone and drop out-of-scope project labels
+        // (unless the bulk patch set labels explicitly). Keeps milestone counts
+        // honest and avoids un-editable label sets after a cross-project move.
+        if (array_key_exists('project', $patch)) {
+            $newProjectId = (int)$patch['project'];
+            if ($newProjectId !== (int)$task['project_id']) {
+                pm_exec('UPDATE tasks SET milestone_id = NULL WHERE id = ? AND milestone_id IS NOT NULL AND milestone_id NOT IN (SELECT id FROM milestones WHERE project_id = ?)', [$id, $newProjectId]);
+                if (!(array_key_exists('labels', $patch) && is_array($patch['labels']))) {
+                    pm_exec(
+                        'DELETE tl FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+                         WHERE tl.task_id = ? AND l.project_id IS NOT NULL AND l.project_id <> ?',
+                        [$id, $newProjectId]
+                    );
+                }
             }
         }
         $updated++;
@@ -1204,11 +1271,21 @@ function pm_slack_notify_task_event(array $task, ?array $project, string $event,
 // When a task tied to a recurring rule is completed, spawn the next instance.
 // Missed runs (rule.next_run in the past) are "caught up" to today so we don't
 // create a pile of back-dated tasks the moment someone finally checks in.
-function pm_generate_next_recurring_task(int $ruleId): void {
+function pm_generate_next_recurring_task(int $ruleId, ?int $completedTaskId = null): void {
     try {
         $rule = pm_fetch_one('SELECT * FROM recurring_rules WHERE id = ?', [$ruleId]);
         if (!$rule) return;
         if (!empty($rule['paused'])) return;
+
+        // Dedup guard: only the CURRENT tip of the chain may spawn a successor.
+        // last_task_id points at the most recently generated instance; if the
+        // task we just completed isn't it, a successor already exists. Without
+        // this, reopening a recurring task and completing it again (a fresh
+        // done-transition) spawned another instance every cycle.
+        if ($completedTaskId !== null && $rule['last_task_id'] !== null
+            && (int)$rule['last_task_id'] !== $completedTaskId) {
+            return;
+        }
 
         // Decide the date we'll schedule on.
         $base = $rule['next_run'] ?: date('Y-m-d');
@@ -1239,7 +1316,17 @@ function pm_generate_next_recurring_task(int $ruleId): void {
         if (!$proj) return;
         $prefix = $proj['key_prefix'] ?: pm_config()['project_key'];
 
-        // Same retry-on-collision loop as pm_create_task.
+        // Next position for this project+'todo' column so the spawned task lands
+        // at the end instead of colliding at position 0 with everything else.
+        $posRow = pm_fetch_one(
+            'SELECT COALESCE(MAX(position),0) AS m FROM tasks WHERE project_id = ? AND status = ?',
+            [(int)$rule['project_id'], 'todo']
+        );
+        $position = (float)($posRow['m'] ?? 0) + 1;
+
+        // Same retry-on-collision loop as pm_create_task. Kept in autocommit so
+        // each MAX(ref) read sees other committed inserts (a REPEATABLE-READ
+        // snapshot inside a transaction would keep colliding on the same ref).
         $tid = null;
         $attempts = 0;
         while (true) {
@@ -1252,12 +1339,12 @@ function pm_generate_next_recurring_task(int $ruleId): void {
             $ref = $prefix . '-' . $next;
             try {
                 pm_exec(
-                    'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, estimate, recurring_rule_id, created_by)
-                     VALUES (?,?,?,?,?,?,?,?,?,?)',
+                    'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, position, estimate, recurring_rule_id, created_by)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                     [
                         $ref, (int)$rule['project_id'], 'todo',
                         $rule['title'], $rule['description'],
-                        (int)$rule['priority'], $scheduleFor,
+                        (int)$rule['priority'], $scheduleFor, $position,
                         $rule['estimate'] ?: null,
                         $ruleId, pm_current_user_id(),
                     ]
@@ -1270,21 +1357,32 @@ function pm_generate_next_recurring_task(int $ruleId): void {
             }
         }
 
+        // Metadata + cursor advance in ONE transaction so a failure can't leave
+        // the cursor un-advanced (which used to let the next completion spawn a
+        // duplicate and overrun occurrences_left). On failure the whole spawn is
+        // rolled back and the task row deleted, mirroring pm_create_task.
         $assignees = json_decode((string)($rule['assignees'] ?? ''), true);
         $labels    = json_decode((string)($rule['labels']    ?? ''), true);
-        if (is_array($assignees)) foreach ($assignees as $uid) {
-            pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$tid, (int)$uid]);
+        $occLeft   = $rule['occurrences_left'] === null ? null : max(0, (int)$rule['occurrences_left'] - 1);
+        try {
+            pm_db()->beginTransaction();
+            if (is_array($assignees)) foreach ($assignees as $uid) {
+                pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$tid, (int)$uid]);
+            }
+            if (is_array($labels)) foreach ($labels as $lid) {
+                pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$tid, (int)$lid]);
+            }
+            pm_exec(
+                'UPDATE recurring_rules SET next_run = ?, last_task_id = ?, occurrences_left = ? WHERE id = ?',
+                [$nextAfter, $tid, $occLeft, $ruleId]
+            );
+            pm_db()->commit();
+        } catch (Throwable $e) {
+            if (pm_db()->inTransaction()) pm_db()->rollBack();
+            pm_exec('DELETE FROM tasks WHERE id = ?', [$tid]);
+            error_log('pm_generate_next_recurring_task metadata failed: ' . $e->getMessage());
+            return;
         }
-        if (is_array($labels)) foreach ($labels as $lid) {
-            pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$tid, (int)$lid]);
-        }
-
-        // Advance the rule cursor.
-        $occLeft = $rule['occurrences_left'] === null ? null : max(0, (int)$rule['occurrences_left'] - 1);
-        pm_exec(
-            'UPDATE recurring_rules SET next_run = ?, last_task_id = ?, occurrences_left = ? WHERE id = ?',
-            [$nextAfter, $tid, $occLeft, $ruleId]
-        );
 
         pm_log_activity(pm_current_user_id() ?: 0, $tid, 'recurring_spawn', 'Generated from recurring rule');
         $created = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$tid]);

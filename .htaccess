@@ -1,7 +1,9 @@
 # Make index.html the default landing page.
 DirectoryIndex index.html index.php
 
-# Hide hidden files.
+# Hide hidden files. NOTE: <FilesMatch> only matches the final path segment
+# (the filename), so it does NOT cover dot-DIRECTORIES like /.git/config —
+# the RedirectMatch below closes that gap (source-code / VCS exposure).
 <FilesMatch "^\.">
     Order Allow,Deny
     Deny from all
@@ -9,5 +11,25 @@ DirectoryIndex index.html index.php
 <IfModule mod_authz_core.c>
     <FilesMatch "^\.">
         Require all denied
+    </FilesMatch>
+</IfModule>
+
+# Block direct HTTP access to VCS metadata and other dot-directories at any
+# depth (e.g. /.git/HEAD, /.svn/). Without this, deploying a tree that still
+# contains .git lets anyone reconstruct the full source + commit history.
+RedirectMatch 404 (?i)(^|/)\.(git|svn|hg|bzr)(/|$)
+
+# Disable directory listings (defense-in-depth if an index file is missing).
+<IfModule mod_autoindex.c>
+    Options -Indexes
+</IfModule>
+
+# Clickjacking / referrer protection for the static HTML shells. The JSON API
+# sets these itself in bootstrap.php; frame-ancestors can't be set from a <meta>
+# CSP, so the HTML pages get X-Frame-Options here instead.
+<IfModule mod_headers.c>
+    <FilesMatch "\.html$">
+        Header always set X-Frame-Options "DENY"
+        Header always set Referrer-Policy "strict-origin-when-cross-origin"
     </FilesMatch>
 </IfModule>

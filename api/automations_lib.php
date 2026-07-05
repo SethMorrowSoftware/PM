@@ -113,6 +113,13 @@ function pm_automation_apply(array $rule, array $task, int $taskId, ?int $actorI
                 case 'set_status': {
                     $s = (string)($action['value'] ?? '');
                     if (!in_array($s, PM_AUTOMATION_STATUSES, true)) break;
+                    // NOTE: this writes status directly and therefore deliberately
+                    // does NOT run the normal PATCH side-effects (recurring spawn,
+                    // done notifications, dependency-unblock). That's intentional
+                    // re-entrancy avoidance (the $running guard would otherwise
+                    // recurse), but it means an automation that moves a *recurring*
+                    // task to 'done' will not spawn its next instance. Keep rules
+                    // that complete recurring tasks on the human PATCH path.
                     pm_exec('UPDATE tasks SET status = ? WHERE id = ?', [$s, $taskId]);
                     break;
                 }

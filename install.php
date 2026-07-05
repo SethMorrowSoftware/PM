@@ -670,7 +670,12 @@ a { color: #60A5FA; }
 
 <div class="card">
     <h2>1. Verify database connection</h2>
-    <?php if ($cfg): ?>
+    <?php if ($cfg && $installLocked): ?>
+        <?php // Don't reveal db_name/db_host to an anonymous visitor once the app
+              // is installed — only confirm reachability. Full details show only
+              // during first-run or to a logged-in admin. ?>
+        <div class="ok">Config loaded and connection verified.</div>
+    <?php elseif ($cfg): ?>
         <div class="ok">Config loaded. DB: <code><?= htmlspecialchars($cfg['db_name']) ?></code> @ <code><?= htmlspecialchars($cfg['db_host']) ?></code></div>
         <?php try { pm_db(); echo '<div class="ok">Connection successful.</div>'; } catch (Throwable $e) { echo '<div class="err">Cannot connect. Edit <code>api/config.php</code> with your cPanel MySQL credentials.</div>'; } ?>
     <?php else: ?>

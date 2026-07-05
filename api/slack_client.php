@@ -64,16 +64,26 @@ function pm_slack_post(string $channel, string $text, array $opts = []): bool {
         'channel' => $channel,
         'text'    => $text,
     ], $opts);
+    // Release the PHP session lock BEFORE the network round-trip. Slack sends run
+    // inline on user writes; the default file session handler holds an exclusive
+    // lock for the whole request, so without this a slow/unreachable Slack would
+    // serialize every OTHER concurrent request from the same user (poll,
+    // navigation) behind this call. Nothing below writes to $_SESSION.
+    if (session_status() === PHP_SESSION_ACTIVE) { @session_write_close(); }
+    // Bounded budget so a Slack outage adds at most a few seconds of latency to a
+    // (already-succeeded) write: 2 attempts, short timeouts. The message is
+    // best-effort — failures are logged to app_settings, not surfaced as errors.
+    $maxAttempts = 2;
     $attempts = 0;
     $lastErr = '';
-    while ($attempts < 3) {
+    while ($attempts < $maxAttempts) {
         $attempts++;
         $ch = curl_init('https://slack.com/api/chat.postMessage');
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 4,
-            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_TIMEOUT        => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
             CURLOPT_HTTPHEADER     => [
                 'Authorization: Bearer ' . $token,
                 'Content-Type: application/json; charset=utf-8',
@@ -86,7 +96,7 @@ function pm_slack_post(string $channel, string $text, array $opts = []): bool {
         curl_close($ch);
         if ($body === false) {
             $lastErr = 'Network error: ' . ($err ?: "HTTP $code");
-            if ($attempts < 3) usleep(100000 * $attempts);
+            if ($attempts < $maxAttempts) usleep(100000 * $attempts);
             continue;
         }
         $decoded = json_decode((string)$body, true);
@@ -99,7 +109,7 @@ function pm_slack_post(string $channel, string $text, array $opts = []): bool {
         $apiErr = is_array($decoded) ? ($decoded['error'] ?? 'Unknown Slack error') : 'Invalid response';
         $lastErr = 'Slack API: ' . $apiErr;
         $retryable = $code >= 500 || $code === 429 || in_array($apiErr, ['ratelimited','internal_error','fatal_error'], true);
-        if (!$retryable || $attempts >= 3) break;
+        if (!$retryable || $attempts >= $maxAttempts) break;
         usleep(100000 * $attempts);
     }
     pm_slack_note_error($lastErr ?: 'Unknown error');
