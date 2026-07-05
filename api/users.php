@@ -54,9 +54,26 @@ if ($method === 'PATCH' && $id !== null) {
         }
         $f[]='is_admin = ?'; $p[]=$wantAdmin;
     }
+    if (isset($body['password']) && (string)$body['password'] !== '') {
+        // Admin fail-safe reset (this whole PATCH is already admin-gated).
+        // Unlike the self-service path in auth.php, no current password is
+        // required — that's the point when someone is locked out. The change
+        // is recorded in the activity log so resets are auditable.
+        $pw = (string)$body['password'];
+        if (strlen($pw) < 8) pm_error('Password must be at least 8 characters');
+        $f[]='password_hash = ?'; $p[]=password_hash($pw, PASSWORD_DEFAULT);
+    }
     if (!$f) pm_error('Nothing to update');
     $p[] = $id;
     pm_exec('UPDATE users SET ' . implode(',', $f) . ' WHERE id = ?', $p);
+    if (isset($body['password']) && (string)$body['password'] !== '') {
+        try {
+            $who = pm_fetch_one('SELECT name FROM users WHERE id = ?', [$id]);
+            pm_exec('INSERT INTO activity (user_id, task_id, action, detail) VALUES (?,?,?,?)',
+                [pm_current_user_id() ?: 0, null, 'password_reset',
+                 'Admin reset the password for ' . ($who['name'] ?? ('user #' . $id))]);
+        } catch (Throwable $_) { /* audit is best-effort */ }
+    }
     $row = pm_fetch_one('SELECT id, name, role, initials, color, is_admin FROM users WHERE id = ?', [$id]);
     if (!$row) pm_error('Not found', 404);
     pm_json(['user' => pm_public_user($row)]);

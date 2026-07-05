@@ -254,23 +254,10 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       canWrite ? h('button', { class: 'icon-btn', title: 'Duplicate task',
         onClick: async () => {
           try {
-            const r = await API.createTask({
-              title: task.title + ' (copy)',
-              project: task.project,
-              status: task.status,
-              priority: task.priority,
-              description: task.description || '',
-              estimate: task.estimate || '',
-              due: task.due || null,
-              start_date: task.start_date || null,
-              milestone_id: task.milestone_id || null,
-              assignees: (task.assignees || []).slice(),
-              labels: (task.labels || []).slice(),
-            });
+            // Server-side duplicate: one atomic call that also copies labels,
+            // assignees, custom-field values, and subtasks (reset unchecked).
+            const r = await API.duplicateTask(task.id);
             const newTask = r.task || r;
-            for (const s of (task.subtasks || [])) {
-              try { await API.addSubtask(newTask.id, s.text); } catch (_) {}
-            }
             if (window.pmRefreshTasks) window.pmRefreshTasks();
             toast('Task duplicated', 'success');
             location.hash = '#task=' + newTask.id;
@@ -740,10 +727,37 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
         };
         minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
         noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+
+        // Live timer (one per user; starting here auto-stops any other task's
+        // timer). The topbar shows the running chip with elapsed time.
+        const running = window.state.timer && window.state.timer.task_id === task.id;
+        const timerBtn = h('button', {
+          class: 'btn ' + (running ? 'btn-primary' : 'btn-ghost'),
+          style: { fontSize: '12px' },
+          title: running ? 'Stop the timer and log the elapsed time'
+                         : 'Start a live timer for this task',
+          onClick: async () => {
+            try {
+              if (running) {
+                const r = await API.timerStop();
+                window.state.timer = null;
+                toast(`Logged ${r.stopped?.minutes || 0}m`, 'success');
+                await loadTime();
+              } else {
+                const r = await API.timerStart(task.id);
+                window.state.timer = r.timer;
+                if (r.stopped_previous) toast(`Previous timer logged ${r.stopped_previous.minutes}m`, 'info');
+              }
+              if (window.pmRefreshTasks) window.pmRefreshTasks(); else refreshBoard();
+            } catch (e) { toast(e.message, 'error'); }
+          },
+        }, Icon(running ? 'x' : 'play', 12), running ? ' Stop timer' : ' Start timer');
+
         tsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px' } },
           Icon('clock', 13),
           minInput, noteInput,
           h('button', { class: 'btn btn-ghost', style: { fontSize: '12px' }, onClick: submitTime }, 'Log time'),
+          timerBtn,
         ));
       }
       return tsec;
@@ -865,6 +879,27 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       subBox.appendChild(h('div', { style: { padding: '9px 12px', color: 'var(--fg-3)', fontSize: '12px' } }, 'No subtasks.'));
     }
     sub.forEach((s, i) => {
+      // Promote a checklist step that grew into real work (Asana-style
+      // "convert to task"). Appears on hover next to delete.
+      const promote = canWrite ? h('button', {
+        class: 'icon-btn sm sub-del',
+        title: 'Convert to its own task',
+        style: { opacity: '0', transition: 'opacity 0.1s' },
+        onClick: async (e) => {
+          e.stopPropagation();
+          try {
+            const r = await API.promoteSubtask(task.id, s.id);
+            task.subtasks = (task.subtasks || []).filter(x => x.id !== s.id);
+            if (window.pmRefreshTasks) window.pmRefreshTasks();
+            const nt = r.task || r;
+            toast(`Now its own task: ${nt.ref || ''}`, 'success', {
+              ms: 6000,
+              action: { label: 'Open', onClick: () => { location.hash = '#task=' + nt.id; } },
+            });
+            redraw();
+          } catch (err) { toast(err.message, 'error'); }
+        },
+      }, Icon('gitBranch', 12)) : null;
       const del = canWrite ? h('button', {
         class: 'icon-btn sm sub-del',
         title: 'Delete subtask',
@@ -891,13 +926,14 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             redraw();
           } catch(e){toast(e.message,'error');}
         } : null,
-        onMouseenter: canWrite ? e => { e.currentTarget.style.background = 'var(--bg-4)'; if (del) del.style.opacity = '1'; } : null,
-        onMouseleave: canWrite ? e => { e.currentTarget.style.background = 'transparent'; if (del) del.style.opacity = '0'; } : null,
+        onMouseenter: canWrite ? e => { e.currentTarget.style.background = 'var(--bg-4)'; if (del) del.style.opacity = '1'; if (promote) promote.style.opacity = '1'; } : null,
+        onMouseleave: canWrite ? e => { e.currentTarget.style.background = 'transparent'; if (del) del.style.opacity = '0'; if (promote) promote.style.opacity = '0'; } : null,
       },
         Checkbox(s.done, 16),
         h('span', { style: { fontSize: '13px', flex: 1,
           color: s.done ? 'var(--fg-3)' : 'var(--fg-1)',
           textDecoration: s.done ? 'line-through' : 'none' } }, s.text),
+        promote,
         del,
       );
       subBox.appendChild(row);

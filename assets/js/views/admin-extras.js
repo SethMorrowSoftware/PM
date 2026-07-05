@@ -54,6 +54,13 @@ window.renderAdminExtras = function () {
     users: [],
     teamForm: { id: null, name: '', email: '', password: '', role: '' },
 
+    // Intake forms: public request links (v3).
+    intakeLoading: true,
+    intakeErr: '',
+    intakeSaving: false,
+    intakeForms: [],
+    intakeForm: { project_id: '', name: '', description: '', default_priority: 2, default_label_id: '' },
+
     // Project access: pick a project, then manage its visibility + member list.
     paProjectId: '',     // '' = none chosen yet
     paLoading: false,    // true while listProjectMembers is in flight
@@ -1269,16 +1276,39 @@ window.renderAdminExtras = function () {
     redraw();
   }
 
-  function genPassword() {
-    // Readable-ish random initial password the admin can share; the user can
-    // change it later under Profile. Avoids ambiguous chars.
+  function randomPassword() {
+    // Readable-ish random password the admin can share; avoids ambiguous chars.
     const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
     let out = '';
     const buf = new Uint32Array(14);
     (window.crypto || {}).getRandomValues?.(buf);
     for (let i = 0; i < 14; i++) out += cs[(buf[i] || (i * 7 + 11)) % cs.length];
-    model.teamForm.password = out;
+    return out;
+  }
+
+  function genPassword() {
+    model.teamForm.password = randomPassword();
     redraw();
+  }
+
+  // Fail-safe reset: an admin sets a member's password directly (no current
+  // password needed — that's the point when someone is locked out). The
+  // dialog is pre-filled with a strong generated password the admin can
+  // accept as-is or type over; it's copied to the clipboard on success.
+  async function resetMemberPassword(u) {
+    const pw = await promptDialog({
+      title: `Reset password — ${u.name}`,
+      label: 'New password (they can change it later under Profile)',
+      value: randomPassword(),
+    });
+    if (pw == null || pw === '') return;
+    if (pw.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+    try {
+      await API.updateUser(u.id, { password: pw });
+      let copied = false;
+      try { await navigator.clipboard.writeText(pw); copied = true; } catch (_) { /* http or denied */ }
+      toast(`Password updated for ${u.name}${copied ? ' — copied to clipboard' : ''}`, 'success', { ms: 6000 });
+    } catch (e) { toast(e.message || 'Password reset failed', 'error'); }
   }
 
   async function saveTeamMember() {
@@ -1409,6 +1439,8 @@ window.renderAdminExtras = function () {
         ),
         h('div', { class: 'row-actions' },
           h('button', { class: 'btn btn-ghost', onClick: () => { resetTeamForm(u); redraw(); } }, 'Edit'),
+          h('button', { class: 'btn btn-ghost', title: 'Set a new password for this member (fail-safe reset)',
+            onClick: () => resetMemberPassword(u) }, 'Reset password'),
           h('button', { class: 'btn btn-ghost', onClick: () => toggleAdmin(u) }, u.is_admin ? 'Remove admin' : 'Make admin'),
           u.id === meId ? null : h('button', { class: 'btn btn-ghost', onClick: () => deleteMember(u) }, 'Remove'),
         ),
@@ -1418,10 +1450,134 @@ window.renderAdminExtras = function () {
     body.appendChild(list);
   }
 
+  // ---------- Intake forms (public request links) ----------
+  async function refreshIntake() {
+    model.intakeLoading = true; redraw();
+    try {
+      const r = await API.listIntakeForms();
+      model.intakeForms = r.forms || [];
+      model.intakeErr = '';
+    } catch (e) { model.intakeErr = e.message || 'Failed to load intake forms'; }
+    model.intakeLoading = false; redraw();
+  }
+  async function saveIntakeForm() {
+    const f = model.intakeForm;
+    if (!f.project_id) { model.intakeErr = 'Pick a project for submissions to land in'; redraw(); return; }
+    if (!f.name.trim()) { model.intakeErr = 'Form name is required'; redraw(); return; }
+    model.intakeSaving = true; model.intakeErr = ''; redraw();
+    try {
+      await API.createIntakeForm({
+        project_id: Number(f.project_id),
+        name: f.name.trim(),
+        description: f.description.trim(),
+        default_priority: Number(f.default_priority),
+        default_label_id: f.default_label_id ? Number(f.default_label_id) : null,
+      });
+      model.intakeForm = { project_id: '', name: '', description: '', default_priority: 2, default_label_id: '' };
+      toast('Intake form created', 'success');
+      await refreshIntake();
+    } catch (e) { model.intakeErr = e.message || 'Failed to save form'; }
+    model.intakeSaving = false; redraw();
+  }
+  function intakeUrl(f) {
+    return location.origin + location.pathname.replace(/[^/]*$/, '') + 'form.php?f=' + f.token;
+  }
+  function renderIntake(body) {
+    if (!(window.state && window.state.me && window.state.me.is_admin)) return;
+
+    body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
+      h('div', null,
+        h('h3', null, 'Intake forms'),
+        h('div', { class: 'sub' },
+          'Public "report an issue" links — no account needed. Print one as a QR code and anyone on the floor can file a request straight onto the board.'),
+      ),
+    ));
+
+    const f = model.intakeForm;
+    const form = h('div', { class: 'settings-form' });
+    form.appendChild(h('div', null,
+      h('label', null, 'Form name'),
+      h('input', { type: 'text', value: f.name, placeholder: 'e.g. Report a ride/arcade issue', onInput: e => { f.name = e.target.value; } }),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Submissions land in'),
+      h('select', { value: f.project_id, onChange: e => { f.project_id = e.target.value; } },
+        h('option', { value: '' }, 'Select project…'),
+        (window.state.projects || []).map(p => h('option', { value: String(p.id) }, p.name)),
+      ),
+    ));
+    form.appendChild(h('div', { class: 'full' },
+      h('label', null, 'Intro text shown on the form (optional)'),
+      h('input', { type: 'text', value: f.description, placeholder: 'Spotted a problem? Tell the tech team.', onInput: e => { f.description = e.target.value; } }),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Default priority'),
+      h('select', { value: String(f.default_priority), onChange: e => { f.default_priority = Number(e.target.value); } },
+        h('option', { value: '0' }, 'Urgent'), h('option', { value: '1' }, 'High'),
+        h('option', { value: '2' }, 'Medium'), h('option', { value: '3' }, 'Low'),
+      ),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Auto-apply label (optional)'),
+      h('select', { value: f.default_label_id, onChange: e => { f.default_label_id = e.target.value; } },
+        h('option', { value: '' }, 'None'),
+        (window.state.labels || []).map(l => h('option', { value: String(l.id) }, l.name)),
+      ),
+    ));
+    form.appendChild(h('div', { class: 'form-foot' },
+      model.intakeErr ? h('span', { class: 'err' }, model.intakeErr) : null,
+      h('button', { class: 'btn btn-primary', disabled: model.intakeSaving, onClick: saveIntakeForm }, 'Create form'),
+    ));
+    body.appendChild(form);
+
+    if (model.intakeLoading) { body.appendChild(h('div', { class: 'empty' }, 'Loading intake forms…')); return; }
+
+    const list = h('div', { class: 'settings-list' });
+    for (const it of model.intakeForms) {
+      const proj = (window.state.projects || []).find(p => p.id == it.project_id);
+      list.appendChild(h('div', { class: 'settings-row' + (it.enabled ? '' : ' archived') },
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title' },
+            it.name,
+            it.enabled ? null : h('span', { class: 'pill muted' }, 'Off'),
+          ),
+          h('div', { class: 'row-meta' },
+            h('span', null, `→ ${proj ? proj.name : 'Unknown project'}`),
+            h('span', null, `${it.submissions} submission${it.submissions === 1 ? '' : 's'}`),
+            h('span', { class: 'mono', style: { userSelect: 'all', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '340px' } }, intakeUrl(it)),
+          ),
+        ),
+        h('div', { class: 'row-actions' },
+          h('button', { class: 'btn btn-ghost', title: 'Copy the public link', onClick: async () => {
+            try { await navigator.clipboard.writeText(intakeUrl(it)); toast('Public form link copied', 'success'); }
+            catch (_) { toast('Copy failed — the URL is shown in the row', 'error'); }
+          } }, 'Copy link'),
+          h('button', { class: 'btn btn-ghost', onClick: async () => {
+            try { await API.updateIntakeForm(it.id, { enabled: !it.enabled }); await refreshIntake(); }
+            catch (e) { toast(e.message || 'Failed', 'error'); }
+          } }, it.enabled ? 'Turn off' : 'Turn on'),
+          h('button', { class: 'btn btn-ghost', onClick: async () => {
+            const ok = await confirmDialog({
+              title: 'Delete intake form?',
+              body: `"${it.name}" — its public link stops working immediately. Tasks it already created are kept.`,
+              confirmText: 'Delete form',
+            });
+            if (!ok) return;
+            try { await API.deleteIntakeForm(it.id); toast('Intake form deleted', 'success'); await refreshIntake(); }
+            catch (e) { toast(e.message || 'Failed', 'error'); }
+          } }, 'Delete'),
+        ),
+      ));
+    }
+    if (!model.intakeForms.length) list.appendChild(h('div', { class: 'empty' }, 'No intake forms yet — create one above and share the link.'));
+    body.appendChild(list);
+  }
+
   // ---------- render ----------
   function redraw() {
     root.replaceChildren();
     renderTeam(root);
+    renderIntake(root);
     renderMilestones(root);
     renderCustomFields(root);
     renderTemplates(root);
@@ -1430,7 +1586,7 @@ window.renderAdminExtras = function () {
   }
 
   redraw();
-  if (window.state && window.state.me && window.state.me.is_admin) refreshTeam();
+  if (window.state && window.state.me && window.state.me.is_admin) { refreshTeam(); refreshIntake(); }
   refreshMilestones();
   refreshCustomFields();
   refreshTemplates();

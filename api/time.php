@@ -45,6 +45,61 @@ function pm_time_total(int $taskId): int {
     return (int)($row['total'] ?? 0);
 }
 
+/** The caller's running timer: {task_id, started_at, ref, title} | null. */
+function pm_timer_state(int $uid): ?array {
+    $u = pm_fetch_one('SELECT timer_task_id, timer_started_at FROM users WHERE id = ?', [$uid]);
+    if (!$u || !$u['timer_task_id'] || !$u['timer_started_at']) return null;
+    $t = pm_fetch_one('SELECT id, ref, title FROM tasks WHERE id = ?', [(int)$u['timer_task_id']]);
+    if (!$t) return null; // task deleted while timing
+    return [
+        'task_id'    => (int)$t['id'],
+        'ref'        => $t['ref'],
+        'title'      => $t['title'],
+        'started_at' => $u['timer_started_at'],
+    ];
+}
+
+/** Stop the caller's running timer (if any), logging a time entry. */
+function pm_timer_stop_internal(int $uid): ?array {
+    $u = pm_fetch_one('SELECT timer_task_id, timer_started_at FROM users WHERE id = ?', [$uid]);
+    if (!$u || !$u['timer_task_id'] || !$u['timer_started_at']) return null;
+    $taskId = (int)$u['timer_task_id'];
+    $elapsed = max(0, time() - (int)strtotime((string)$u['timer_started_at']));
+    $minutes = max(1, (int)round($elapsed / 60));
+    // Guard against runaway timers someone forgot for a week: cap one entry at
+    // 12h — long enough for any real shift, short enough to stay plausible.
+    $minutes = min($minutes, 720);
+    pm_exec('UPDATE users SET timer_task_id = NULL, timer_started_at = NULL WHERE id = ?', [$uid]);
+    if (pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId])) {
+        pm_exec('INSERT INTO time_entries (task_id, user_id, minutes, note, spent_on) VALUES (?,?,?,?,CURDATE())',
+            [$taskId, $uid, $minutes, 'Timer']);
+        return ['task_id' => $taskId, 'minutes' => $minutes, 'entry_id' => (int)pm_last_id()];
+    }
+    return null;
+}
+
+// ---- running timer routes (one active timer per user, monday-style) --------
+$timerAction = isset($_GET['action']) ? (string)$_GET['action'] : '';
+if ($timerAction !== '') {
+    if ($timerAction === 'timer' && $method === 'GET') {
+        pm_json(['timer' => pm_timer_state($uid)]);
+    }
+    if ($timerAction === 'timer_start' && $method === 'POST') {
+        $taskId = pm_int_param('task_id');
+        if (!$taskId || !pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId])) pm_error('Task not found', 404);
+        if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
+        $stopped = pm_timer_stop_internal($uid); // auto-stop any previous timer
+        pm_exec('UPDATE users SET timer_task_id = ?, timer_started_at = NOW() WHERE id = ?', [$taskId, $uid]);
+        pm_json(['timer' => pm_timer_state($uid), 'stopped_previous' => $stopped]);
+    }
+    if ($timerAction === 'timer_stop' && $method === 'POST') {
+        $stopped = pm_timer_stop_internal($uid);
+        if (!$stopped) pm_error('No timer is running', 400);
+        pm_json(['stopped' => $stopped, 'total_minutes' => pm_time_total((int)$stopped['task_id']), 'timer' => null]);
+    }
+    pm_error('Method not allowed', 405);
+}
+
 if ($method === 'GET') {
     $taskId = pm_int_param('task_id');
     if (!$taskId) pm_error('task_id is required');

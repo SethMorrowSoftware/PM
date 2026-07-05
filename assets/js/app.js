@@ -63,6 +63,10 @@
     // monday-style default: finished work stays off the task boards until you
     // ask for it (toggle pill in the filter bar / command palette). '0' = shown.
     hideDone: localStorage.getItem('pm_hidedone') !== '0',
+    // v3: running time-tracking timer ({task_id, ref, title, started_at} | null)
+    // and the user's email-notification preference ('all'|'mentions'|'none').
+    timer: boot.timer || null,
+    emailNotifs: boot.emailNotifs || 'all',
     // view-local UI state, LIFTED here so it survives full re-renders
     ui: {
       list:      { groupBy: 'status', sortBy: 'priority', sortDir: 'asc', collapsed: {}, selected: [] },
@@ -259,11 +263,35 @@
     refreshActivity();
     return r;
   }
-  async function moveTask(id, statusId) { return updateTask(id, { status: statusId }); }
+  // Status changes get an Undo toast (monday-style): completing or moving a
+  // task can be reverted for a few seconds without hunting it down — which
+  // matters extra now that done tasks disappear from the boards by default.
+  function offerStatusUndo(id, prevStatus, newStatus) {
+    if (prevStatus === newStatus) return;
+    const t = state.tasks.find(x => x.id === id);
+    const label = newStatus === 'done'
+      ? `${t?.ref || 'Task'} completed`
+      : `${t?.ref || 'Task'} moved to ${statusById(newStatus)?.name || newStatus}`;
+    toast(label, 'success', {
+      ms: 8000,
+      action: { label: 'Undo', onClick: () => updateTask(id, { status: prevStatus })
+        .catch(e => toast(e.message || 'Could not undo', 'error')) },
+    });
+  }
+  async function moveTask(id, statusId) {
+    const prev = state.tasks.find(x => x.id === id)?.status;
+    const r = await updateTask(id, { status: statusId });
+    if (prev !== undefined) offerStatusUndo(id, prev, statusId);
+    return r;
+  }
   async function toggleStatus(id) {
     const t = state.tasks.find(x => x.id === id);
     if (!t) return;
-    return updateTask(id, { status: t.status === 'done' ? 'todo' : 'done' });
+    const prev = t.status;
+    const next = prev === 'done' ? 'todo' : 'done';
+    const r = await updateTask(id, { status: next });
+    offerStatusUndo(id, prev, next);
+    return r;
   }
   async function toggleSubtask(taskId, subId, done) {
     await API.updateSubtask(taskId, subId, { done });
@@ -695,7 +723,13 @@
       onBulkUpdate: bulkUpdateTasks,
       onToggleSubtask: toggleSubtask,
       onMoveTaskDate: (id, due) => updateTask(id, { due }),
-      onReorder: (id, patch) => updateTask(id, patch),
+      onReorder: (id, patch) => {
+        const prev = state.tasks.find(x => x.id === id)?.status;
+        return updateTask(id, patch).then(r => {
+          if (patch.status && prev && patch.status !== prev) offerStatusUndo(id, prev, patch.status);
+          return r;
+        });
+      },
       onNavigate: (v, projectId) => {
         state.view = v;
         if (projectId !== undefined) state.filterProject = projectId;
@@ -791,6 +825,43 @@
     search.appendChild(input);
     search.appendChild(h('span', { class: 'kbd' }, navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl+K'));
     bar.appendChild(search);
+
+    // Running time-tracking timer: live elapsed chip. Ticks by updating the
+    // text node only (no re-render); click opens the task, ■ stops & logs.
+    if (state.timer && state.timer.task_id) {
+      const fmtElapsed = () => {
+        const s = Math.max(0, Math.floor((Date.now() - new Date(state.timer.started_at.replace(' ', 'T') + 'Z').getTime()) / 1000));
+        const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+        return (hh ? hh + ':' : '') + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
+      };
+      const elapsed = h('span', { class: 'timer-elapsed' }, fmtElapsed());
+      const tick = setInterval(() => {
+        if (!document.body.contains(elapsed) || !state.timer) { clearInterval(tick); return; }
+        elapsed.textContent = fmtElapsed();
+      }, 1000);
+      const chip = h('button', {
+        class: 'timer-chip',
+        title: `Timing ${state.timer.ref} — ${state.timer.title}. Click to open the task.`,
+        onClick: () => { state.openTaskId = state.timer.task_id; setTaskHash(state.timer.task_id); renderApp(); },
+      },
+        Icon('timer', 13),
+        elapsed,
+        h('span', { class: 'timer-title' }, state.timer.ref),
+        h('span', {
+          class: 'timer-stop', role: 'button', title: 'Stop timer and log time',
+          onClick: async (e) => {
+            e.stopPropagation();
+            try {
+              const r = await API.timerStop();
+              state.timer = null;
+              toast(`Logged ${r.stopped?.minutes || 0}m`, 'success');
+              renderApp();
+            } catch (err) { toast(err.message || 'Could not stop timer', 'error'); }
+          },
+        }, '■'),
+      );
+      bar.appendChild(chip);
+    }
 
     // Theme toggle (sun/moon) — built in ui.js, reads window.state.theme.
     bar.appendChild(ThemeToggle(toggleTheme));
@@ -1141,6 +1212,7 @@
       color: state.me.color || '#3B82F6',
       current_password: '',
       password: '',
+      email_notifs: state.emailNotifs || 'all',
     };
     const frag = document.createDocumentFragment();
     const scrim = h('div', { class: 'scrim', onClick: close });
@@ -1163,12 +1235,13 @@
         toast('Enter your current password to change it', 'error'); return;
       }
       try {
-        const payload = { name, role: form.role.trim(), color: form.color };
+        const payload = { name, role: form.role.trim(), color: form.color, email_notifs: form.email_notifs };
         if (form.password) {
           payload.password = form.password;
           payload.current_password = form.current_password;
         }
         const r = await API.updateProfile(payload);
+        state.emailNotifs = form.email_notifs;
         state.me = r.user;
         state.users = state.users.map(u => u.id === r.user.id ? r.user : u);
         toast('Profile updated', 'success');
@@ -1218,6 +1291,48 @@
       body.appendChild(h('div', null,
         h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '5px', fontWeight: '500' } }, 'Avatar color'),
         swatches,
+      ));
+
+      body.appendChild(h('div', { style: { height: '1px', background: 'var(--line)', margin: '4px 0 2px' } }));
+      body.appendChild(h('div', { style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600' } }, 'Notifications & calendar'));
+
+      body.appendChild(h('div', null,
+        h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '5px', fontWeight: '500' } }, 'Email notifications'),
+        h('select', {
+          style: fieldStyle,
+          value: form.email_notifs,
+          onChange: e => { form.email_notifs = e.target.value; },
+        },
+          h('option', { value: 'all' }, 'All activity (assignments, comments, mentions, daily digest)'),
+          h('option', { value: 'mentions' }, 'Only when I\'m @mentioned'),
+          h('option', { value: 'none' }, 'Never email me'),
+        ),
+      ));
+
+      // Personal iCalendar feed: subscribe from Google/Apple/Outlook so due
+      // dates show up next to real appointments. The URL is a capability —
+      // Reset invalidates the old one.
+      const calRow = h('div', { class: 'hstack', style: { gap: '8px' } },
+        h('button', { class: 'btn btn-ghost', onClick: async () => {
+          try {
+            const r = await API.icsMine();
+            await navigator.clipboard.writeText(r.url);
+            toast('Calendar link copied — paste it into Google/Apple Calendar under "Subscribe by URL"', 'success', { ms: 5000 });
+          } catch (e) { toast(e.message || 'Could not fetch calendar link', 'error'); }
+        } }, Icon('calendar', 13), ' Copy calendar link'),
+        h('button', { class: 'btn btn-muted', title: 'Invalidate the old link and mint a new one', onClick: async () => {
+          try {
+            const r = await API.icsReset();
+            await navigator.clipboard.writeText(r.url);
+            toast('New calendar link copied — the old one no longer works', 'success', { ms: 5000 });
+          } catch (e) { toast(e.message || 'Could not reset calendar link', 'error'); }
+        } }, 'Reset link'),
+      );
+      body.appendChild(h('div', null,
+        h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '5px', fontWeight: '500' } }, 'Calendar feed'),
+        calRow,
+        h('div', { style: { fontSize: '11.5px', color: 'var(--fg-3)', marginTop: '5px' } },
+          'Your assigned tasks with due dates, as a subscribable calendar.'),
       ));
 
       body.appendChild(h('div', { style: { height: '1px', background: 'var(--line)', margin: '4px 0 2px' } }));
@@ -1346,7 +1461,7 @@
         ['project access', 'lock'], ['projects', 'folder'], ['labels', 'tag'],
         ['slack', 'message'], ['recurring', 'clock'], ['team', 'users'],
         ['milestone', 'target'], ['custom', 'settings'], ['template', 'flag'],
-        ['automation', 'zap'],
+        ['automation', 'zap'], ['intake', 'link'],
       ];
       const tabByTarget = {};
       heads.forEach((head, i) => {

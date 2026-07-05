@@ -65,6 +65,8 @@ const API = {
       labels:   labels.labels,
       users:    users.users,
       tasks:    tasks.tasks,
+      timer:    me.timer || null,
+      emailNotifs: me.email_notifs || 'all',
     };
   },
 
@@ -216,6 +218,25 @@ const API = {
   listReminders(taskId)           { return this.get(`reminders.php?task_id=${taskId}`); },
   addReminder(taskId, data)       { return this.post(`reminders.php?task_id=${taskId}`, data); },
   deleteReminder(id)              { return this.del(`reminders.php?id=${id}`); },
+
+  // ---- v3: task actions ----
+  duplicateTask(id)               { return this.post(`tasks.php?id=${id}&action=duplicate`, {}); },
+  promoteSubtask(taskId, subId)   { return this.post(`tasks.php?id=${taskId}&action=promote_subtask&subtask_id=${subId}`, {}); },
+
+  // ---- v3: running timer ----
+  timerStatus()                   { return this.get('time.php?action=timer'); },
+  timerStart(taskId)              { return this.post(`time.php?action=timer_start&task_id=${taskId}`, {}); },
+  timerStop()                     { return this.post('time.php?action=timer_stop', {}); },
+
+  // ---- v3: intake forms (admin) ----
+  listIntakeForms()               { return this.get('intake.php'); },
+  createIntakeForm(data)          { return this.post('intake.php', data); },
+  updateIntakeForm(id, patch)     { return this.patch(`intake.php?id=${id}`, patch); },
+  deleteIntakeForm(id)            { return this.del(`intake.php?id=${id}`); },
+
+  // ---- v3: calendar feed ----
+  icsMine()                       { return this.get('ics.php?action=mine'); },
+  icsReset()                      { return this.post('ics.php?action=reset', {}); },
 };
 
 window.API = API;

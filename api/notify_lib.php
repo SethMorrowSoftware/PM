@@ -4,6 +4,8 @@
 // All functions are best-effort: a failure here must never break the request.
 
 require_once __DIR__ . '/db.php';
+// Email mirroring (guarded so a partial deploy without the file is harmless).
+if (is_file(__DIR__ . '/mail_lib.php')) require_once __DIR__ . '/mail_lib.php';
 
 /** Insert one in-app notification. No self-notify. */
 function pm_notify(int $userId, ?int $actorId, ?int $taskId, string $type, string $body): void {
@@ -15,6 +17,10 @@ function pm_notify(int $userId, ?int $actorId, ?int $taskId, string $type, strin
              VALUES (?,?,?,?,?,0)',
             [$userId, $actorId, $taskId, substr($type, 0, 32), mb_substr($body, 0, 500)]
         );
+        // Mirror to email per the user's preference (fail-silent inside).
+        if (function_exists('pm_mail_notification')) {
+            pm_mail_notification($userId, $type, $body, $taskId);
+        }
     } catch (Throwable $_) { /* best effort */ }
 }
 
@@ -163,6 +169,11 @@ function pm_run_due_sweep(): void {
             }
         }
     } catch (Throwable $_) { /* best effort */ }
+
+    // 3) Morning email digests (once per user per day; no cron needed).
+    if (function_exists('pm_mail_run_digests')) {
+        try { pm_mail_run_digests(); } catch (Throwable $_) { /* best effort */ }
+    }
 }
 
 // Load the optional automation engine AFTER our helpers are defined, so its
