@@ -835,8 +835,11 @@
     for (const [k, l, ic] of viewDef) {
       tabs.appendChild(h('button', {
         class: 'view-tab' + (state.view === k ? ' active' : ''),
+        // title keeps the label available on hover / to screen readers when the
+        // text collapses to an icon-only tab on narrower screens.
+        title: l, 'aria-label': l,
         onClick: () => { state.view = k; persist(); renderApp(); },
-      }, Icon(ic, 13), ' ' + l));
+      }, Icon(ic, 13), h('span', { class: 'view-tab-label' }, l)));
     }
     bar.appendChild(tabs);
 

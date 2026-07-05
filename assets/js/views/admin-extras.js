@@ -47,6 +47,13 @@ window.renderAdminExtras = function () {
       actions: [],
     },
 
+    // Team: list users + create/edit/delete + role & admin management.
+    teamLoading: true,
+    teamErr: '',
+    teamSaving: false,
+    users: [],
+    teamForm: { id: null, name: '', email: '', password: '', role: '' },
+
     // Project access: pick a project, then manage its visibility + member list.
     paProjectId: '',     // '' = none chosen yet
     paLoading: false,    // true while listProjectMembers is in flight
@@ -1235,9 +1242,186 @@ window.renderAdminExtras = function () {
     body.appendChild(addForm);
   }
 
+  // ---------- team / members ----------
+  function resetTeamForm(u = null) {
+    model.teamErr = '';
+    model.teamForm.id = u?.id ?? null;
+    model.teamForm.name = u?.name ?? '';
+    model.teamForm.email = u?.email ?? '';
+    model.teamForm.password = '';
+    model.teamForm.role = u?.role ?? '';
+  }
+
+  async function refreshTeam() {
+    model.teamLoading = true;
+    redraw();
+    try {
+      const r = await API.listUsers();
+      model.users = r.users || [];
+      // Keep the app-wide user list (assignee pickers, avatars) in sync.
+      if (window.state) window.state.users = model.users;
+    } catch (e) {
+      model.teamErr = e.message || 'Failed to load team';
+      toast(e.message || 'Failed to load team', 'error');
+    } finally {
+      model.teamLoading = false;
+    }
+    redraw();
+  }
+
+  function genPassword() {
+    // Readable-ish random initial password the admin can share; the user can
+    // change it later under Profile. Avoids ambiguous chars.
+    const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    let out = '';
+    const buf = new Uint32Array(14);
+    (window.crypto || {}).getRandomValues?.(buf);
+    for (let i = 0; i < 14; i++) out += cs[(buf[i] || (i * 7 + 11)) % cs.length];
+    model.teamForm.password = out;
+    redraw();
+  }
+
+  async function saveTeamMember() {
+    const f = model.teamForm;
+    const name = (f.name || '').trim();
+    const email = (f.email || '').trim();
+    if (!name) { model.teamErr = 'Name is required'; redraw(); return; }
+    model.teamSaving = true;
+    model.teamErr = '';
+    redraw();
+    try {
+      if (f.id) {
+        // Edit an existing member (name + role). Email/password change happen
+        // elsewhere (the user's own Profile / admin reset flow).
+        await API.updateUser(f.id, { name, role: f.role || '' });
+        toast('Member updated', 'success');
+      } else {
+        // Create: the register endpoint lets a signed-in admin add users even
+        // when public registration is disabled. is_admin defaults to 0 — promote
+        // afterward with the "Make admin" action.
+        if (!email) { throw new Error('Email is required'); }
+        if ((f.password || '').length < 8) { throw new Error('Set an initial password of at least 8 characters (use Generate)'); }
+        await API.register({ name, email, password: f.password, role: f.role || '' });
+        toast(`Added ${name}. Share their initial password so they can sign in.`, 'success');
+      }
+      resetTeamForm();
+      await refreshTeam();
+    } catch (e) {
+      model.teamErr = e.message || 'Failed to save member';
+      toast(e.message || 'Failed to save member', 'error');
+    } finally {
+      model.teamSaving = false;
+      redraw();
+    }
+  }
+
+  async function toggleAdmin(u) {
+    try {
+      await API.updateUser(u.id, { is_admin: !u.is_admin });
+      await refreshTeam();
+      toast(u.is_admin ? `${u.name} is no longer an admin` : `${u.name} is now an admin`, 'success');
+    } catch (e) {
+      toast(e.message || 'Could not change admin status', 'error');
+    }
+  }
+
+  async function deleteMember(u) {
+    const ok = await confirmDialog({
+      title: `Remove ${u.name}?`,
+      message: 'They lose access immediately. Their comments and activity are kept (attributed to a former teammate).',
+      confirmText: 'Remove',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await API.deleteUser(u.id);
+      if (model.teamForm.id === u.id) resetTeamForm();
+      await refreshTeam();
+      toast('Member removed', 'success');
+    } catch (e) {
+      toast(e.message || 'Could not remove member', 'error');
+    }
+  }
+
+  function renderTeam(body) {
+    // Managing users is admin-only server-side; only show the panel to admins.
+    if (!(window.state && window.state.me && window.state.me.is_admin)) return;
+
+    body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
+      h('div', null,
+        h('h3', null, 'Team members'),
+        h('div', { class: 'sub' }, 'Add teammates, set roles, grant admin, or remove access. New members sign in with the initial password you set here.'),
+      ),
+    ));
+
+    const editing = !!model.teamForm.id;
+    const form = h('div', { class: 'settings-form' });
+    form.appendChild(h('div', null,
+      h('label', null, 'Name'),
+      h('input', { type: 'text', value: model.teamForm.name, placeholder: 'Jane Technician', onInput: e => { model.teamForm.name = e.target.value; } }),
+    ));
+    form.appendChild(h('div', null,
+      h('label', null, 'Role (optional)'),
+      h('input', { type: 'text', value: model.teamForm.role, placeholder: 'e.g. Field Tech', onInput: e => { model.teamForm.role = e.target.value; } }),
+    ));
+    if (!editing) {
+      form.appendChild(h('div', null,
+        h('label', null, 'Email'),
+        h('input', { type: 'email', value: model.teamForm.email, placeholder: 'jane@castletechteam.com', onInput: e => { model.teamForm.email = e.target.value; } }),
+      ));
+      form.appendChild(h('div', null,
+        h('label', null, 'Initial password'),
+        h('div', { style: { display: 'flex', gap: '6px' } },
+          h('input', { type: 'text', value: model.teamForm.password, placeholder: 'min 8 characters', style: { flex: 1 }, onInput: e => { model.teamForm.password = e.target.value; } }),
+          h('button', { class: 'btn btn-ghost', type: 'button', onClick: genPassword }, 'Generate'),
+        ),
+      ));
+    } else {
+      form.appendChild(h('div', null,
+        h('label', null, 'Email'),
+        h('input', { type: 'email', value: model.teamForm.email, disabled: true, style: { opacity: 0.7 } }),
+      ));
+    }
+    form.appendChild(h('div', { class: 'form-foot' },
+      model.teamErr ? h('span', { class: 'err' }, model.teamErr) : null,
+      editing ? h('button', { class: 'btn btn-ghost', onClick: () => { resetTeamForm(); redraw(); } }, 'Cancel edit') : null,
+      h('button', { class: 'btn btn-primary', disabled: model.teamSaving, onClick: saveTeamMember }, editing ? 'Save member' : 'Add member'),
+    ));
+    body.appendChild(form);
+
+    if (model.teamLoading) { body.appendChild(h('div', { class: 'empty' }, 'Loading team…')); return; }
+
+    const meId = window.state.me.id;
+    const list = h('div', { class: 'settings-list' });
+    for (const u of model.users) {
+      list.appendChild(h('div', { class: 'settings-row' },
+        h('div', { class: 'row-main' },
+          h('div', { class: 'row-title' },
+            Avatar(u, 22),
+            h('span', { style: { marginLeft: '2px' } }, u.name),
+            u.is_admin ? h('span', { class: 'pill ok' }, 'Admin') : null,
+            u.id === meId ? h('span', { class: 'pill muted' }, 'You') : null,
+          ),
+          h('div', { class: 'row-meta' },
+            h('span', null, u.role || 'No role'),
+            u.email ? h('span', null, u.email) : null,
+          ),
+        ),
+        h('div', { class: 'row-actions' },
+          h('button', { class: 'btn btn-ghost', onClick: () => { resetTeamForm(u); redraw(); } }, 'Edit'),
+          h('button', { class: 'btn btn-ghost', onClick: () => toggleAdmin(u) }, u.is_admin ? 'Remove admin' : 'Make admin'),
+          u.id === meId ? null : h('button', { class: 'btn btn-ghost', onClick: () => deleteMember(u) }, 'Remove'),
+        ),
+      ));
+    }
+    if (!model.users.length) list.appendChild(h('div', { class: 'empty' }, 'No team members yet.'));
+    body.appendChild(list);
+  }
+
   // ---------- render ----------
   function redraw() {
     root.replaceChildren();
+    renderTeam(root);
     renderMilestones(root);
     renderCustomFields(root);
     renderTemplates(root);
@@ -1246,6 +1430,7 @@ window.renderAdminExtras = function () {
   }
 
   redraw();
+  if (window.state && window.state.me && window.state.me.is_admin) refreshTeam();
   refreshMilestones();
   refreshCustomFields();
   refreshTemplates();

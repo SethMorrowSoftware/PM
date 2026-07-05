@@ -7,7 +7,14 @@ $method = pm_method();
 $id = pm_int_param('id');
 
 if ($method === 'GET' && $id === null) {
-    $rows = pm_fetch_all('SELECT id, name, role, initials, color, is_admin FROM users ORDER BY name');
+    // Expose email ONLY to admins (for the Team management panel). Non-admins
+    // still get the email-free shape, preserving the no-enumeration posture.
+    $me = pm_current_user();
+    $isAdmin = $me && !empty($me['is_admin']);
+    $cols = $isAdmin
+        ? 'id, name, role, initials, color, is_admin, email'
+        : 'id, name, role, initials, color, is_admin';
+    $rows = pm_fetch_all("SELECT $cols FROM users ORDER BY name");
     pm_json(['users' => array_map('pm_public_user', $rows)]);
 }
 
