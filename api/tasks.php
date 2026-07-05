@@ -73,6 +73,13 @@ if ($id !== null && isset($_GET['subtasks'])) {
     pm_error('Method not allowed', 405);
 }
 
+// One-shot task actions: ?id=N&action=duplicate | ?id=N&action=promote_subtask&subtask_id=M
+if ($id !== null && isset($_GET['action']) && $method === 'POST') {
+    if ($_GET['action'] === 'duplicate') pm_duplicate_task($id);
+    if ($_GET['action'] === 'promote_subtask' && $subId !== null) pm_promote_subtask($id, $subId);
+    pm_error('Unknown action', 400);
+}
+
 if ($id !== null && $subId !== null) {
     if ($method === 'PATCH')  pm_update_subtask($id, $subId);
     if ($method === 'DELETE') pm_delete_subtask($id, $subId);
@@ -1244,6 +1251,110 @@ function pm_bulk_update_tasks(): void {
 function pm_log_activity(int $uid, ?int $taskId, string $action, ?string $detail = null): void {
     pm_exec('INSERT INTO activity (user_id, task_id, action, detail) VALUES (?,?,?,?)',
         [$uid, $taskId, $action, $detail]);
+}
+
+/**
+ * Duplicate a task within its project: copies fields, labels, assignees,
+ * custom-field values, and subtasks (reset to unchecked so the copy is a fresh
+ * checklist). Comments, attachments, and time entries are NOT copied.
+ */
+function pm_duplicate_task(int $id): void {
+    $uid = pm_current_user_id() ?? 0;
+    $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$id]);
+    if (!$t) pm_error('Not found', 404);
+
+    $proj = pm_fetch_one('SELECT key_prefix FROM projects WHERE id = ?', [(int)$t['project_id']]);
+    $prefix = ($proj['key_prefix'] ?? '') ?: pm_config()['project_key'];
+    $title = mb_substr((string)$t['title'], 0, 491) . ' (copy)';
+
+    $posRow = pm_fetch_one(
+        'SELECT COALESCE(MAX(position),0) AS m FROM tasks WHERE project_id = ? AND status = ?',
+        [(int)$t['project_id'], $t['status']]);
+    $position = (float)($posRow['m'] ?? 0) + 1;
+
+    $newId = null; $attempts = 0;
+    while (true) {
+        $maxRow = pm_fetch_one(
+            "SELECT MAX(CAST(SUBSTRING_INDEX(ref,'-',-1) AS UNSIGNED)) AS m FROM tasks WHERE ref LIKE ?",
+            [$prefix . '-%']);
+        $n = max(100, ((int)($maxRow['m'] ?? 0)) + 1);
+        try {
+            pm_exec(
+                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, start_date,
+                                    estimate, position, milestone_id, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                [$prefix . '-' . $n, (int)$t['project_id'], $t['status'], $title, $t['description'],
+                 (int)$t['priority'], $t['due'], $t['start_date'], $t['estimate'], $position,
+                 $t['milestone_id'], $uid]);
+            $newId = pm_last_id();
+            break;
+        } catch (PDOException $e) {
+            if ($e->getCode() !== '23000' || ++$attempts >= 5) pm_error('Could not allocate a task ref', 500);
+            usleep(random_int(1000, 5000));
+        }
+    }
+
+    pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id)
+             SELECT ?, label_id FROM task_labels WHERE task_id = ?', [$newId, $id]);
+    pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id)
+             SELECT ?, user_id FROM task_assignees WHERE task_id = ?', [$newId, $id]);
+    pm_exec('INSERT INTO subtasks (task_id, text, done, sort_order)
+             SELECT ?, text, 0, sort_order FROM subtasks WHERE task_id = ? ORDER BY sort_order', [$newId, $id]);
+    try {
+        pm_exec('INSERT INTO task_custom_values (task_id, field_id, value)
+                 SELECT ?, field_id, value FROM task_custom_values WHERE task_id = ?', [$newId, $id]);
+    } catch (Throwable $_) { /* optional table on older installs */ }
+
+    pm_log_activity($uid, $newId, 'duplicated', 'Duplicated from ' . $t['ref']);
+    pm_get_task($newId); // responds with the full new task
+}
+
+/**
+ * Promote a subtask to a standalone task in the same project. The subtask row
+ * is removed; its text becomes the new task's title.
+ */
+function pm_promote_subtask(int $taskId, int $subId): void {
+    $uid = pm_current_user_id() ?? 0;
+    $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$taskId]);
+    if (!$t) pm_error('Not found', 404);
+    $st = pm_fetch_one('SELECT * FROM subtasks WHERE id = ? AND task_id = ?', [$subId, $taskId]);
+    if (!$st) pm_error('Subtask not found', 404);
+
+    $proj = pm_fetch_one('SELECT key_prefix FROM projects WHERE id = ?', [(int)$t['project_id']]);
+    $prefix = ($proj['key_prefix'] ?? '') ?: pm_config()['project_key'];
+
+    $posRow = pm_fetch_one(
+        "SELECT COALESCE(MAX(position),0) AS m FROM tasks WHERE project_id = ? AND status = 'todo'",
+        [(int)$t['project_id']]);
+    $position = (float)($posRow['m'] ?? 0) + 1;
+
+    $newId = null; $attempts = 0;
+    while (true) {
+        $maxRow = pm_fetch_one(
+            "SELECT MAX(CAST(SUBSTRING_INDEX(ref,'-',-1) AS UNSIGNED)) AS m FROM tasks WHERE ref LIKE ?",
+            [$prefix . '-%']);
+        $n = max(100, ((int)($maxRow['m'] ?? 0)) + 1);
+        try {
+            pm_exec(
+                'INSERT INTO tasks (ref, project_id, status, title, description, priority, position, created_by)
+                 VALUES (?,?,?,?,?,?,?,?)',
+                [$prefix . '-' . $n, (int)$t['project_id'],
+                 !empty($st['done']) ? 'done' : 'todo',
+                 mb_substr((string)$st['text'], 0, 500),
+                 'Promoted from a subtask of ' . $t['ref'] . ' "' . $t['title'] . '"',
+                 (int)$t['priority'], $position, $uid]);
+            $newId = pm_last_id();
+            break;
+        } catch (PDOException $e) {
+            if ($e->getCode() !== '23000' || ++$attempts >= 5) pm_error('Could not allocate a task ref', 500);
+            usleep(random_int(1000, 5000));
+        }
+    }
+
+    pm_exec('DELETE FROM subtasks WHERE id = ?', [$subId]);
+    pm_log_activity($uid, $newId, 'created', 'Promoted from a subtask of ' . $t['ref']);
+    pm_log_activity($uid, $taskId, 'subtask_promoted', 'Subtask "' . mb_substr((string)$st['text'], 0, 100) . '" became ' . $prefix . '-' . $n);
+    pm_get_task($newId);
 }
 
 // Best-effort Slack notification. Never bubbles errors up: the request-level

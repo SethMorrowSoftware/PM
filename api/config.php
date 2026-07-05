@@ -27,4 +27,13 @@ return [
     // Default resolves to <repo>/storage/attachments.
     // 'attachments_dir' => __DIR__ . '/../storage/attachments',
     'attachments_max_bytes' => 10 * 1024 * 1024, // 10 MB per file
+
+    // Email notifications (assignments, mentions, comments, daily digest).
+    // Sent via PHP mail() — works out of the box on cPanel. Set
+    // 'email_enabled' => false to silence all outgoing mail.
+    'email_enabled' => true,
+    'mail_from'     => '',   // default: noreply@<your-domain>
+    'app_url'       => '',   // absolute base URL used in email links + calendar
+                             // feeds, e.g. 'https://example.com/pm'. Leave empty
+                             // to auto-detect from the request.
 ];

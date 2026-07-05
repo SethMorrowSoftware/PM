@@ -246,6 +246,24 @@ function pm_install_schema(): void {
             CONSTRAINT fk_rr_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
+        "CREATE TABLE IF NOT EXISTS intake_forms (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            project_id INT NOT NULL,
+            token VARCHAR(64) NOT NULL UNIQUE,
+            name VARCHAR(200) NOT NULL,
+            description TEXT NULL,
+            default_status VARCHAR(32) NOT NULL DEFAULT 'todo',
+            default_priority TINYINT NOT NULL DEFAULT 2,
+            default_label_id INT NULL,
+            default_assignees TEXT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            submissions INT NOT NULL DEFAULT 0,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_if_project (project_id),
+            CONSTRAINT fk_if_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
         "CREATE TABLE IF NOT EXISTS saved_views (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id INT NOT NULL,
@@ -484,6 +502,13 @@ function pm_install_schema(): void {
     pm_migrate_add_column_if_missing('labels',   'archived',      'TINYINT(1) NOT NULL DEFAULT 0');
     pm_migrate_add_column_if_missing('tasks',    'recurring_rule_id', 'INT NULL');
     pm_migrate_add_column_if_missing('recurring_rules', 'subtasks_json', 'TEXT NULL');
+    // v3: email notifications, calendar feeds, running timers.
+    pm_migrate_add_column_if_missing('users', 'email_notifs',     "VARCHAR(16) NOT NULL DEFAULT 'all'");
+    pm_migrate_add_column_if_missing('users', 'last_digest',      'DATE NULL');
+    pm_migrate_add_column_if_missing('users', 'ics_token',        'VARCHAR(64) NULL');
+    pm_migrate_add_column_if_missing('users', 'timer_task_id',    'INT NULL');
+    pm_migrate_add_column_if_missing('users', 'timer_started_at', 'DATETIME NULL');
+    pm_migrate_add_index_if_missing('users', 'idx_users_ics', '(ics_token)');
     pm_migrate_add_index_if_missing('labels', 'idx_lbl_project', '(project_id)');
     pm_migrate_add_index_if_missing('tasks',  'idx_recurring',   '(recurring_rule_id)');
     pm_migrate_add_column_if_missing('comments', 'updated_at',   'TIMESTAMP NULL');

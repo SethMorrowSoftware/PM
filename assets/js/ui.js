@@ -394,7 +394,13 @@ function projectPickerContent(value, onChange, close) {
 }
 
 // -------- Toast --------
-function toast(msg, kind = 'info', ms = 3200) {
+// toast(msg, kind, ms) — or pass an options object as the third argument to
+// get an inline action button: toast('Task completed', 'success',
+// { ms: 8000, action: { label: 'Undo', onClick: fn } }). Clicking the action
+// dismisses the toast immediately.
+function toast(msg, kind = 'info', msOrOpts = 3200) {
+  const opts = (msOrOpts && typeof msOrOpts === 'object') ? msOrOpts : { ms: msOrOpts };
+  const ms = opts.ms || 3200;
   let host = document.querySelector('.toast-host');
   if (!host) {
     // Live region so screen readers announce success/error toasts (they're
@@ -405,9 +411,20 @@ function toast(msg, kind = 'info', ms = 3200) {
   // Errors are more urgent — announce assertively.
   host.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   const t = h('div', { class: 'toast ' + kind }, msg);
+  let fadeT, killT;
+  if (opts.action && typeof opts.action.onClick === 'function') {
+    t.appendChild(h('button', {
+      class: 'toast-action',
+      onClick: () => {
+        clearTimeout(fadeT); clearTimeout(killT);
+        t.remove();
+        try { opts.action.onClick(); } catch (e) { console.error(e); }
+      },
+    }, opts.action.label || 'Undo'));
+  }
   host.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.2s'; }, ms - 200);
-  setTimeout(() => t.remove(), ms);
+  fadeT = setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.2s'; }, ms - 200);
+  killT = setTimeout(() => t.remove(), ms);
 }
 
 // -------- relTime / fmtMinutes --------

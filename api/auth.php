@@ -8,9 +8,28 @@ switch ($action) {
     case 'me':
         $u = pm_current_user();
         $cfg = pm_config();
+        // pm_current_user() returns a fixed column set; the v3 extras (running
+        // timer, email preference) are fetched here. try/catch keeps 'me'
+        // working on installs that haven't run the v3 migration yet.
+        $timer = null; $emailPref = null;
+        if ($u) {
+            try {
+                $extra = pm_fetch_one(
+                    'SELECT email_notifs, timer_task_id, timer_started_at FROM users WHERE id = ?',
+                    [(int)$u['id']]);
+                $emailPref = $extra['email_notifs'] ?? 'all';
+                if ($extra && !empty($extra['timer_task_id']) && !empty($extra['timer_started_at'])) {
+                    $tt = pm_fetch_one('SELECT id, ref, title FROM tasks WHERE id = ?', [(int)$extra['timer_task_id']]);
+                    if ($tt) $timer = ['task_id' => (int)$tt['id'], 'ref' => $tt['ref'], 'title' => $tt['title'],
+                                       'started_at' => $extra['timer_started_at']];
+                }
+            } catch (Throwable $_) { $emailPref = 'all'; }
+        }
         pm_json([
             'user' => $u ? pm_public_user($u) : null,
             'allow_public_register' => !empty($cfg['allow_public_register']),
+            'timer' => $timer,
+            'email_notifs' => $emailPref,
         ]);
 
     case 'login': {
@@ -100,6 +119,13 @@ switch ($action) {
         if (mb_strlen($name) > 120) pm_error('Name is too long');
         if (mb_strlen($role) > 80)  pm_error('Role is too long');
         if ($color !== '' && !preg_match('/^#[0-9A-Fa-f]{6}$/', $color)) pm_error('Invalid color');
+        // Optional email-notification preference (kept separate from the
+        // required fields so older clients that never send it are unaffected).
+        $emailPref = (string)pm_param('email_notifs', '');
+        if ($emailPref !== '' && in_array($emailPref, ['all', 'mentions', 'none'], true)) {
+            try { pm_exec('UPDATE users SET email_notifs = ? WHERE id = ?', [$emailPref, $uid]); }
+            catch (Throwable $_) { /* column may predate migration */ }
+        }
         $initials = pm_make_initials($name);
         if ($pass !== '') {
             if (strlen($pass) < 8) pm_error('Password must be at least 8 characters');
