@@ -11,9 +11,11 @@ This app is designed to run on typical **cPanel + PHP + MySQL/MariaDB** hosting 
 
 It preserves the original design direction in `design/` while shipping a production-ready vanilla JS + PHP implementation.
 
-## Current product status (April 22, 2026)
+## Current product status
 
-The software is currently a full multi-view task manager with:
+The software has grown well past its first cut (see "What's new in v2" and
+"Beyond v2" below — the codebase is at the v2.9 feature set). At its core it is
+a full multi-view task manager with:
 
 - Auth, profile updates, and admin/member permissions
 - Project and label management (including archive + merge controls)
@@ -56,6 +58,16 @@ See `docs/V2-CONTRACT.md` for the full v2 implementation spec.
 - **v2.3** — saved views capture full **layout** (grouping/sort/columns), a
   **compact/comfortable density** toggle, and a **keyboard-shortcuts help** (press `?`).
 - **v2.4** — **Goals / OKRs** (link goals to projects, auto or manual progress).
+- **v2.5** — **CSV import**, mobile **bottom-nav**, and task **duplicate**.
+- **v2.6** — **per-project access control**: projects have a `visibility`
+  (`open` — the legacy all-can-read/write default — or `private`), with
+  `project_members` roles (`owner`/`editor`/`viewer`). See the Authorization
+  model below and `api/access_lib.php`.
+- **v2.7 / v2.8** — safe **Markdown** in descriptions/comments, full
+  **read-only** affordances for `viewer`-role members, and private-project
+  board locks.
+- **v2.9** — attachment **image thumbnails + lightbox**, a **customizable
+  dashboard**, and **server-side task search** (`tasks.php?search=`).
 
 For release validation coverage, see `docs/regression-checklist.md`.
 
@@ -63,7 +75,7 @@ For release validation coverage, see `docs/regression-checklist.md`.
 
 | Layer | Implementation |
 |---|---|
-| Frontend | Vanilla ES modules via script tags (no bundler), plain CSS, inline SVG icon set |
+| Frontend | Vanilla ES2020 JS on the `window` global (plain `<script>` tags in a fixed load order — **no ES modules, no bundler**), plain CSS, inline SVG icon set |
 | Backend | Plain PHP endpoints (`api/*.php`), session-based auth, PDO helpers |
 | Database | MySQL/MariaDB (InnoDB, utf8mb4) |
 | State | API-backed data + `localStorage` for persisted UI preferences |
@@ -90,11 +102,15 @@ For release validation coverage, see `docs/regression-checklist.md`.
 
 ### 3) Views
 
-- **Dashboard**: summary cards, workload, activity feed
-- **Kanban**: drag/drop status movement
-- **List**: grouping/sorting + bulk actions
+- **Dashboard**: customizable summary cards, workload, activity feed, charts
+- **Kanban**: drag/drop status movement + manual reorder
+- **List**: grouping/sorting (incl. Manual/position) + bulk actions
 - **Checklist (My tasks)**: assignee-focused personal queue
 - **Calendar**: month view with drag-to-reschedule support
+- **Timeline / Gantt**: start→due bars, dependencies, milestones
+- **Workload**: per-assignee capacity view
+- **Activity**: paginated, filterable audit log
+- **Goals**: OKRs linked to projects
 
 ### 4) Filtering and productivity
 
@@ -188,10 +204,22 @@ Recurring rule management is available in the in-app **Admin settings** modal an
 ├── index.html
 ├── login.html
 ├── register.html
-├── install.php             # run once, then delete in deployed environments
+├── manifest.json           # PWA manifest
+├── sw.js                   # service worker (offline shell; never caches /api/)
+├── storage/                # runtime data (attachments, ratelimit) — gitignored
+├── install.php             # run once, then DELETE in deployed environments
+├── seed.php                # optional demo-data seeder (admin-only) — DELETE in prod
 ├── PLAN.md                 # roadmap/progress document
 └── README.md
 ```
+
+> The `api/` and `assets/js/views/` trees above are abbreviated — the full v2
+> build adds many more endpoints (`access_lib.php`, `project_members.php`,
+> `milestones.php`, `custom_fields.php`, `time.php`, `dependencies.php`,
+> `notifications.php`, `notify_lib.php`, `attachments.php`, `automations.php`,
+> `templates.php`, `reminders.php`, `goals.php`, …) and views (`timeline.js`,
+> `workload.js`, `activity.js`, `goals.js`, `import.js`, `command-palette.js`,
+> `admin-extras.js`). See `CLAUDE.md` for the authoritative layout.
 
 ## Install and deploy (cPanel)
 
@@ -200,7 +228,7 @@ Recurring rule management is available in the in-app **Admin settings** modal an
 3. **Edit `api/config.php`** with DB credentials and desired flags.
 4. Open **`/install.php`** and run schema + default seed.
 5. Create the first admin account in installer UI.
-6. **Delete `install.php`** after successful setup.
+6. **Delete `install.php`** (and `seed.php`, if uploaded) after successful setup.
 7. Log in at `login.html`.
 
 ## Configuration
@@ -229,22 +257,59 @@ Installer creates and migrates the following core tables:
 - `recurring_rules`
 - `saved_views`
 
-The installer includes additive migration helpers to backfill missing columns/indexes/FKs on older installs.
+Plus the v2+ tables: `task_attachments`, `task_dependencies`, `milestones`,
+`time_entries`, `custom_fields`, `task_custom_values`, `notifications`,
+`comment_mentions`, `comment_reactions`, `task_watchers`, `reminders`,
+`task_templates`, `automation_rules`, `goals`, `goal_projects`, and
+`project_members`.
+
+The installer includes additive migration helpers to backfill missing columns/indexes/FKs on older installs. Re-run `install.php` (then delete it again) to apply schema changes to an existing database.
 
 ## Authorization model
 
-- All task read/write operations require authentication.
-- Project/label/task write operations are available to all authenticated users.
-- Slack/recurring settings write operations require admin privileges.
-- User role/admin mutations require admin privileges.
-- Server-side checks are authoritative (UI visibility is not the only control).
+- All reads/writes require authentication; server-side checks are authoritative
+  (UI hiding is never the only control).
+- **Open projects** (the default `visibility` for every project, incl. all
+  legacy ones): any authenticated user can read and write their tasks, labels,
+  and project settings — the original team-collaboration behavior.
+- **Private projects** (v2.6): only `project_members` can read; `owner`/`editor`
+  can write; `viewer` is read-only. Global admins bypass all project
+  restrictions. Enforcement is centralized in `api/access_lib.php` and applied
+  across `tasks.php`, `projects.php`, and every task-scoped endpoint
+  (attachments/time/dependencies/custom-values/reminders) as well as the list
+  endpoints (milestones/labels/recurring/templates/custom_fields/automations),
+  which filter out rows for private projects the caller can't read.
+- **Admin only**: Slack settings, recurring rules, automation rules, task
+  templates, **custom-field definitions**, **milestone create/edit/delete**,
+  user role/admin mutations, project visibility/membership, and a project's
+  Slack channel. Attachment/time-entry delete requires uploader/owner-or-admin.
+- Project membership + visibility are managed in **Admin Settings → Project
+  access** (`api/project_members.php`).
 
 ## Operational notes
 
 - No build pipeline: file edits deploy directly.
 - For cache busting, bump `?v=` query params in HTML script/link tags.
 - If using HTTPS, set `cookie_secure` to `true`.
-- Keep `api/.htaccess` protections in place.
+- Keep the `.htaccess` protections in place (`api/.htaccess` hides
+  `config.php`; the root rules block `.git`/dotfiles and disable directory
+  listings; `storage/.htaccess` denies direct access to uploads).
+- **Delete `install.php` AND `seed.php` after setup.** Both are destructive,
+  browser-run tools. `seed.php` wipes and reseeds all data and now requires an
+  authenticated admin session (it will not run for an anonymous visitor).
+- **Deploy without `.git`.** Copy the working tree (not the repository) into
+  `public_html`, or the root `.htaccess` VCS block is your only protection.
+  Don't commit real DB credentials into `api/config.php` — it's a placeholder
+  template (see `.gitignore`).
+- **Background work is lazy (no cron):** notifications/reminders/due-soon fire
+  from `pm_run_due_sweep()` on notification polls, and recurring tasks spawn
+  when the current instance is completed. On a very low-traffic site, a cPanel
+  cron hitting `api/notifications.php` every few minutes makes delivery timely.
+- **Storage growth:** uploaded attachments accumulate under
+  `storage/attachments`; rate-limit files under `storage/ratelimit` are
+  GC'd opportunistically. For attachment confidentiality on non-Apache
+  (pure-Nginx) cPanel stacks, set `attachments_dir` in `config.php` to a path
+  outside the web root. Take periodic DB + `storage/` backups.
 
 ## Regression and QA
 

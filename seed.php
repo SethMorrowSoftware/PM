@@ -59,7 +59,13 @@ if (!$errors) {
     }
 }
 
-$seedLocked = $adminExists && !$currentAdmin;
+// Lock the seeder unless the caller is an authenticated admin. Previously this
+// only engaged once an admin already existed ($adminExists && !$currentAdmin),
+// which left a window right after install.php (schema exists, no admin yet) in
+// which an anonymous visitor could wipe the DB and seed a known-credential
+// admin. Requiring an admin session closes that window: on a fresh box, create
+// the admin via install.php first, then sign in and seed.
+$seedLocked = !$currentAdmin;
 
 function sp_make_initials(string $name): string {
     $parts = preg_split('/\s+/', trim($name));
@@ -139,7 +145,9 @@ function sp_seed_data(): array {
         ],
     ];
 
-    $defaultPassword = 'CastleSeed!2026';
+    // Generate a fresh random password per run instead of shipping a published
+    // one in source. It's returned in the seed summary and shown once on screen.
+    $defaultPassword = 'Castle-' . bin2hex(random_bytes(6));
 
     $pdo->beginTransaction();
     try {
@@ -285,25 +293,26 @@ function sp_seed_data(): array {
             );
         }
 
-        // App-level settings and integration placeholders.
-        $settings = [
-            'app.name' => 'Castle Fun Center Tech Tasks',
-            'slack.enabled' => '0',
-            'slack.channel_default' => '#castle-tech',
-            'slack.events' => json_encode([
-                'task_created' => true,
-                'task_completed' => true,
-                'task_assigned' => true,
-                'comment_added' => true,
+        // Seed a single, coherent 'slack' settings object (the ONLY key the app
+        // actually reads — see slack_client.php). It stays disabled with no
+        // token, so nothing sends until an admin adds one in Settings. The old
+        // dotted keys (slack.enabled, app.name, seed.*) were dead data never
+        // read anywhere, so they've been dropped.
+        pm_exec('INSERT INTO app_settings (name, value) VALUES (?,?)', ['slack', json_encode([
+            'enabled'          => false,
+            'bot_token'        => '',
+            'default_channel'  => '#castle-tech',
+            'events'           => [
+                'task_created'     => true,
+                'task_completed'   => true,
+                'task_assigned'    => true,
+                'comment_added'    => true,
                 'project_archived' => false,
-                'mention_added' => true,
-            ]),
-            'seed.generated_at' => gmdate('c'),
-            'seed.notes' => 'Data modeled for attractions and maintenance flows at Castle Fun Center in Chester, NY.',
-        ];
-        foreach ($settings as $k => $v) {
-            pm_exec('INSERT INTO app_settings (name, value) VALUES (?,?)', [$k, $v]);
-        }
+                'mention_added'    => true,
+            ],
+            'templates'        => [],
+            'delivery_history' => [],
+        ])]);
 
         $pdo->commit();
 
@@ -377,7 +386,7 @@ ul { margin: 8px 0 0; }
         <h1>Castle Data Seeder</h1>
         <p class="sub">This resets and repopulates users, projects, labels, tasks, subtasks, assignees, comments, activity, recurring rules, saved views, and app settings in one click.</p>
         <div class="warn"><strong>Danger:</strong> This script truncates most application tables before reseeding. Use on staging/new installs only, or backup first.</div>
-        <div class="warn">Default seeded login password for all users: <code>CastleSeed!2026</code></div>
+        <div class="warn">A <strong>random</strong> login password is generated for all seeded users and shown once in the results below after you run the seed. Copy it then — it is not stored anywhere in cleartext.</div>
 
         <?php if ($seedLocked): ?>
         <div class="err"><strong>Seeder locked.</strong> An admin account already exists in this database, so the seeder will not run. <a href="login.html">Sign in as an admin</a> first if you really want to wipe and reseed, or — better — delete <code>seed.php</code> from the server.</div>

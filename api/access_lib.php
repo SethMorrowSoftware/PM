@@ -86,6 +86,23 @@ function pm_readable_project_ids(int $uid): ?array {
     return $ids;
 }
 
+/**
+ * SQL helper for list endpoints that carry a project_id column and must hide
+ * rows belonging to private projects the caller can't read. Returns a WHERE
+ * fragment (referencing the trusted literal $col), or '' when there is no
+ * restriction (admin / no private projects). Rows with a NULL project
+ * (global/unscoped config) stay visible when $includeGlobal is true. Bound
+ * params are appended to $params by reference.
+ */
+function pm_readable_project_where(int $uid, string $col, array &$params, bool $includeGlobal = true): string {
+    $readable = pm_readable_project_ids($uid);
+    if ($readable === null) return ''; // no restriction
+    if (!$readable) return $includeGlobal ? "$col IS NULL" : '1=0';
+    $ph = implode(',', array_fill(0, count($readable), '?'));
+    foreach ($readable as $r) $params[] = (int)$r;
+    return $includeGlobal ? "($col IS NULL OR $col IN ($ph))" : "$col IN ($ph)";
+}
+
 function pm_task_project_id(int $taskId): ?int {
     try {
         $r = pm_fetch_one('SELECT project_id FROM tasks WHERE id = ?', [$taskId]);

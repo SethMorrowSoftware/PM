@@ -13,8 +13,8 @@
   --fg-0: #E8ECF4;
   --fg-1: #C6CDDC;
   --fg-2: #8A94A8;
-  --fg-3: #717B90;        /* raised for WCAG-AA contrast on dark surfaces */
-  --fg-4: #434B5C;
+  --fg-3: #828DA2;        /* WCAG-AA (~4.7:1) on cards while staying below fg-2 */
+  --fg-4: #6B7488;        /* lifted from #434B5C (2:1) so placeholder text is legible */
 
   /* accent (blue) */
   --acc-0: #3B82F6;
@@ -96,8 +96,8 @@
   --fg-0: #1A2231;
   --fg-1: #353F52;
   --fg-2: #5C6678;
-  --fg-3: #707A8C;        /* AA on light surfaces */
-  --fg-4: #98A1B2;
+  --fg-3: #616B7D;        /* AA (~5.3:1) on white, still secondary to fg-2 */
+  --fg-4: #6B7688;        /* lifted from #98A1B2 (2.7:1) to ~AA for placeholder text */
 
   --acc-0: #2563EB;
   --acc-1: #1D4ED8;
@@ -144,8 +144,8 @@
     --fg-0: #1A2231;
     --fg-1: #353F52;
     --fg-2: #5C6678;
-    --fg-3: #707A8C;
-    --fg-4: #98A1B2;
+    --fg-3: #616B7D;
+    --fg-4: #6B7688;
 
     --acc-0: #2563EB;
     --acc-1: #1D4ED8;
@@ -918,8 +918,7 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
     display: grid;
     grid-template-columns: 26px 1fr auto;
     grid-template-areas:
-      "check title title"
-      "check meta  meta";
+      "check title title";
     gap: 2px var(--sp-2);
     padding: var(--sp-3) var(--sp-3);
     align-items: start;
@@ -937,13 +936,28 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   .list-row > .col-check,
   .list-row > .checkbox { grid-area: check; align-self: center; }
   .list-row > .col-title { grid-area: title; min-width: 0; font-size: var(--fs-base); }
+  /* Previously all four shared `grid-area: meta`, so any two present on the same
+     row (e.g. due + priority) stacked ON TOP of each other. Placing them in the
+     title column with no explicit row lets the grid auto-flow each into its own
+     implicit row beneath the title — no overlap. */
   .list-row > .col-due,
   .list-row > .col-priority,
   .list-row > .col-status,
   .list-row > .col-meta {
-    grid-area: meta; font-size: var(--fs-sm); color: var(--fg-2);
+    grid-column: 2 / -1; font-size: var(--fs-sm); color: var(--fg-2);
     display: inline-flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
   }
+}
+
+/* ---------- MOBILE: timeline label column ----------
+   The timeline body already lives in an overflow:auto scroller with a min-width,
+   so it scrolls horizontally on phones rather than crushing the bars. Narrow the
+   200px label column so more of the actual schedule is visible before scrolling.
+   (!important overrides the inline flex on the axis's first cell.) */
+@media (max-width: 640px) {
+  .tl-row { grid-template-columns: 128px 1fr; }
+  .tl-row .tl-label { padding-left: 10px !important; }
+  .tl-axis > .tl-axis-cell:first-child { flex: 0 0 128px !important; }
 }
 
 /* ---------- MOBILE REFLOW: calendar -> single-column agenda ---------- */
@@ -1033,3 +1047,14 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   transition: border-color var(--dur-fast) var(--ease);
 }
 .att-thumb:hover { border-color: var(--acc-border); }
+
+/* ---------- Touch-target sizing (WCAG 2.5.5 / 2.5.8) ----------
+   On touch devices, grow the hit area of small icon buttons and chips without
+   changing their visual size on the desktop. The icon stays centered via the
+   existing place-items:center, so this only expands the tappable region. */
+@media (pointer: coarse) {
+  .icon-btn { min-width: 40px; min-height: 40px; }
+  .icon-btn.sm { min-width: 32px; min-height: 32px; }
+  .chip, .reaction, .cal-event, .dp-day, .mbn-item { min-height: 32px; }
+  .pop-item { min-height: 40px; }
+}

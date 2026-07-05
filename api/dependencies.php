@@ -77,31 +77,46 @@ if ($method === 'POST') {
         pm_error('Forbidden', 403);
     }
 
-    // Cycle check: adding taskId -> dependsOnId means taskId waits on
-    // dependsOnId. If, starting from dependsOnId and following its own
-    // depends_on edges transitively, we can already reach taskId, then the
-    // new edge would close a loop.
-    $visited = [];
-    $stack = [$dependsOnId];
-    while ($stack) {
-        $cur = array_pop($stack);
-        if ($cur === $taskId) pm_error('Adding this dependency would create a cycle');
-        if (isset($visited[$cur])) continue;
-        $visited[$cur] = true;
-        $rows = pm_fetch_all(
-            'SELECT depends_on_id FROM task_dependencies WHERE task_id = ?',
-            [$cur]
-        );
-        foreach ($rows as $row) {
-            $next = (int)$row['depends_on_id'];
-            if (!isset($visited[$next])) $stack[] = $next;
-        }
-    }
+    // Serialize the check+insert with a MySQL advisory lock so two concurrent
+    // adds ("A depends on B" and "B depends on A") can't each pass their own
+    // traversal before the other's row is visible and both create a cycle. The
+    // lock is process-wide and cheap; a short acquire timeout degrades to the
+    // (previous) unlocked behavior rather than blocking the user.
+    $locked = false;
+    try {
+        $lk = pm_fetch_one("SELECT GET_LOCK('pm_dep_graph', 5) AS ok");
+        $locked = $lk && (int)$lk['ok'] === 1;
+    } catch (Throwable $_) { /* proceed best-effort */ }
 
-    pm_exec(
-        'INSERT IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)',
-        [$taskId, $dependsOnId]
-    );
+    try {
+        // Cycle check: adding taskId -> dependsOnId means taskId waits on
+        // dependsOnId. If, starting from dependsOnId and following its own
+        // depends_on edges transitively, we can already reach taskId, then the
+        // new edge would close a loop.
+        $visited = [];
+        $stack = [$dependsOnId];
+        while ($stack) {
+            $cur = array_pop($stack);
+            if ($cur === $taskId) pm_error('Adding this dependency would create a cycle');
+            if (isset($visited[$cur])) continue;
+            $visited[$cur] = true;
+            $rows = pm_fetch_all(
+                'SELECT depends_on_id FROM task_dependencies WHERE task_id = ?',
+                [$cur]
+            );
+            foreach ($rows as $row) {
+                $next = (int)$row['depends_on_id'];
+                if (!isset($visited[$next])) $stack[] = $next;
+            }
+        }
+
+        pm_exec(
+            'INSERT IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)',
+            [$taskId, $dependsOnId]
+        );
+    } finally {
+        if ($locked) { try { pm_fetch_one("SELECT RELEASE_LOCK('pm_dep_graph')"); } catch (Throwable $_) {} }
+    }
     pm_json(['ok' => true]);
 }
 

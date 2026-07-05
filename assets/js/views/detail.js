@@ -251,7 +251,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
       h('button', { class: 'icon-btn', title: 'Copy link',
         onClick: () => { navigator.clipboard?.writeText(`${location.origin}${location.pathname}#task=${task.id}`); toast('Link copied'); } },
         Icon('link', 14)),
-      h('button', { class: 'icon-btn', title: 'Duplicate task',
+      canWrite ? h('button', { class: 'icon-btn', title: 'Duplicate task',
         onClick: async () => {
           try {
             const r = await API.createTask({
@@ -275,7 +275,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
             toast('Task duplicated', 'success');
             location.hash = '#task=' + newTask.id;
           } catch (e) { toast(e.message, 'error'); }
-        } }, Icon('plusCircle', 14)),
+        } }, Icon('plusCircle', 14)) : null,
       canWrite ? h('button', { class: 'icon-btn', title: 'Delete',
         onClick: async () => {
           const ok = await confirmDialog({ title: `Delete ${task.ref}?`, message: task.title, confirmText: 'Delete', danger: true });

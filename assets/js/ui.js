@@ -15,7 +15,9 @@ function h(tag, props, ...children) {
       else if (k === 'dataset' && typeof v === 'object') Object.assign(el.dataset, v);
       else if (k === 'ref' && typeof v === 'function') v(el);
       else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (k === 'html') el.innerHTML = v;
+      // NOTE: there is deliberately no `html:` escape hatch here. Passing raw
+      // HTML strings to innerHTML is the classic XSS foot-gun; all rendering goes
+      // through text nodes or the safe renderMarkdown(). Keep it that way.
       else if (k in el && typeof el[k] !== 'function') {
         try { el[k] = v; } catch { el.setAttribute(k, v); }
       } else {
@@ -126,8 +128,14 @@ function Tag(labelId, small = false) {
 }
 const PRIO_LABELS = ['Urgent', 'High', 'Medium', 'Low'];
 function PriorityFlag(p, showLabel = false) {
-  const el = h('span', { class: `prio p${p}`, title: PRIO_LABELS[p] }, Icon('flag', 12));
-  if (showLabel) el.appendChild(h('span', null, PRIO_LABELS[p]));
+  // role="img"+aria-label so screen readers announce the priority (the glyph is
+  // identical across priorities — only color differs, which is invisible to SR
+  // and colorblind users; the text label carries the meaning).
+  const el = h('span', {
+    class: `prio p${p}`, title: PRIO_LABELS[p],
+    role: 'img', 'aria-label': 'Priority: ' + PRIO_LABELS[p],
+  }, Icon('flag', 12));
+  if (showLabel) el.appendChild(h('span', { 'aria-hidden': 'true' }, PRIO_LABELS[p]));
   return el;
 }
 function StatusPill(statusId) {
@@ -150,9 +158,11 @@ function DueDate(due, small = false) {
   const d = parseISO(due);
   const t = today();
   const diff = Math.round((d - t) / 86400000);
+  // Use theme-aware tokens (not hardcoded dark-mode pastels) so overdue/today
+  // colors stay legible in the light theme too.
   let label, color = 'var(--fg-2)';
-  if (diff < 0) { label = `${Math.abs(diff)}d overdue`; color = '#FCA5A5'; }
-  else if (diff === 0) { label = 'Today'; color = '#FCD34D'; }
+  if (diff < 0) { label = `${Math.abs(diff)}d overdue`; color = 'var(--red-fg)'; }
+  else if (diff === 0) { label = 'Today'; color = 'var(--amber-fg)'; }
   else if (diff === 1) { label = 'Tomorrow'; color = 'var(--fg-1)'; }
   else if (diff < 7) { label = d.toLocaleDateString('en', { weekday: 'short' }); }
   else { label = d.toLocaleDateString('en', { month: 'short', day: 'numeric' }); }
@@ -211,14 +221,32 @@ function openPopover(anchor, buildContent, { offset = 6, align = 'start' } = {})
     pop.remove();
   }
 
+  // Keyboard: roving focus over .pop-item options so pickers (status, priority,
+  // assignee, label, project, milestone) are fully operable without a mouse.
+  const popItems = () => [...pop.querySelectorAll('.pop-item')].filter(el => el.offsetParent !== null);
+  let activeItem = -1;
+  function focusItem(i) {
+    const list = popItems();
+    if (!list.length) return;
+    activeItem = (i + list.length) % list.length;
+    list.forEach((el, idx) => { el.tabIndex = idx === activeItem ? 0 : -1; });
+    list[activeItem].focus();
+  }
+  pop.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); focusItem(activeItem + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); focusItem(activeItem - 1); }
+  });
+
   // Defer so the click that opened it doesn't immediately close it.
   setTimeout(() => document.addEventListener('mousedown', onDown, true), 0);
   document.addEventListener('keydown', onKey);
   // HTML `autofocus` only runs on initial page load; inputs added dynamically
-  // need an explicit .focus() once they're in the DOM.
+  // need an explicit .focus() once they're in the DOM. With no input (e.g. the
+  // status/priority pickers), focus the first option so arrow keys work at once.
   setTimeout(() => {
     const input = pop.querySelector('input, textarea');
     if (input) input.focus();
+    else focusItem(0);
   }, 0);
   return { close: closeMe, el: pop };
 }
@@ -226,7 +254,11 @@ function openPopover(anchor, buildContent, { offset = 6, align = 'start' } = {})
 function PopoverItem({ selected = false, onSelect, children, leading } = {}) {
   const el = h('div', {
     class: 'pop-item' + (selected ? ' selected' : ''),
+    // Keyboard-operable option: role + roving tabindex (openPopover manages the
+    // active tabindex and arrow-key movement); Enter/Space activate it.
+    role: 'option', tabindex: '-1', 'aria-selected': selected ? 'true' : 'false',
     onClick: onSelect,
+    onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (onSelect) onSelect(e); } },
   });
   if (leading) el.appendChild(leading);
   if (Array.isArray(children)) appendChildren(el, children);
@@ -365,9 +397,13 @@ function projectPickerContent(value, onChange, close) {
 function toast(msg, kind = 'info', ms = 3200) {
   let host = document.querySelector('.toast-host');
   if (!host) {
-    host = h('div', { class: 'toast-host' });
+    // Live region so screen readers announce success/error toasts (they're
+    // otherwise purely visual and auto-dismiss in a few seconds).
+    host = h('div', { class: 'toast-host', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'false' });
     document.body.appendChild(host);
   }
+  // Errors are more urgent — announce assertively.
+  host.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   const t = h('div', { class: 'toast ' + kind }, msg);
   host.appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.2s'; }, ms - 200);

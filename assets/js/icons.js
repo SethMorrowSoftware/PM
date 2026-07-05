@@ -70,7 +70,11 @@ function Icon(name, size = 16, stroke = 1.75, className = '') {
   svg.setAttribute('width', String(size));
   svg.setAttribute('height', String(size));
   svg.setAttribute('class', 'icon ' + className);
-  svg.innerHTML = paths;
+  // Icons are decorative — hide from the accessibility tree and take them out of
+  // focus/hit-testing so their meaning comes from adjacent text or aria-labels.
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  svg.innerHTML = paths; // static, trusted path data from ICON_PATHS
   return svg;
 }
 

@@ -49,6 +49,13 @@ if ($method === 'GET' && $id !== null) {
         [$id]
     );
     if (!$row) pm_error('Not found', 404);
+    // Read gate: the list path filters by pm_can_read_project, but this single
+    // fetch must too — otherwise a non-member could read a private project's
+    // name/description/slack_channel by guessing its id. 404 (not 403) so we
+    // don't confirm the id exists.
+    if (function_exists('pm_can_read_project') && !pm_can_read_project(pm_current_user_id() ?? 0, $id)) {
+        pm_error('Not found', 404);
+    }
     $taskCount = pm_fetch_one('SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?', [$id]);
     $out = pm_project_shape($row);
     $out['task_count'] = (int)($taskCount['c'] ?? 0);
@@ -64,8 +71,15 @@ if ($method === 'POST' && $id === null) {
     if ($name === '') pm_error('Name required');
     if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $color)) pm_error('Invalid color');
     if ($prefix === '' || !preg_match('/^[A-Z0-9]{1,8}$/', $prefix)) pm_error('Invalid key_prefix');
-    if ($slack !== null && $slack !== '' && !preg_match('/^[#@]?[A-Za-z0-9\-_.]{1,80}$/', (string)$slack)) {
-        pm_error('Invalid Slack channel (use #channel or channel-id)');
+    if ($slack !== null && $slack !== '') {
+        // The Slack channel routes a project's notifications, so restrict it to
+        // admins (mirrors "Slack settings are admin-only"). Non-admins create
+        // the project without a channel rather than being blocked entirely.
+        $me = pm_current_user();
+        if (empty($me['is_admin'])) { $slack = null; }
+        elseif (!preg_match('/^[#@]?[A-Za-z0-9\-_.]{1,80}$/', (string)$slack)) {
+            pm_error('Invalid Slack channel (use #channel or channel-id)');
+        }
     }
     $sortRow = pm_fetch_one('SELECT COALESCE(MAX(sort_order),0) AS m FROM projects');
     $sort = ((int)($sortRow['m'] ?? 0)) + 1;
@@ -110,6 +124,10 @@ if ($method === 'PATCH' && $id !== null) {
         $f[]='description = ?'; $p[]=$d === '' ? null : $d;
     }
     if (array_key_exists('slack_channel', $body)) {
+        // Changing where a project's notifications are delivered is an admin
+        // action (a low-priv user shouldn't be able to redirect them).
+        $me = pm_current_user();
+        if (empty($me['is_admin'])) pm_error('Only admins can change a project\'s Slack channel', 403);
         $s = $body['slack_channel'];
         if ($s !== null && $s !== '' && !preg_match('/^[#@]?[A-Za-z0-9\-_.]{1,80}$/', (string)$s)) {
             pm_error('Invalid Slack channel (use #channel or channel-id)');

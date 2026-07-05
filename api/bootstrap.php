@@ -5,6 +5,11 @@ require_once __DIR__ . '/db.php';
 
 function pm_boot(): void {
     $c = pm_config();
+    // Pin PHP's timezone to UTC so date()/strtotime() line up with the MySQL
+    // session (also pinned to UTC in db.php). Without this, "due today/tomorrow"
+    // labels and recurring "catch-up" math drift by the host's offset near
+    // midnight on non-UTC cPanel boxes.
+    date_default_timezone_set('UTC');
     if (session_status() === PHP_SESSION_NONE) {
         session_name($c['session_name']);
         session_set_cookie_params([
@@ -41,9 +46,14 @@ function pm_csrf_check(): void {
     $host = $_SERVER['HTTP_HOST'] ?? '';
     if ($host === '') return;
     $candidate = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
-    if ($candidate === '') return; // lenient: no header to check
+    if ($candidate === '') return; // lenient: no header at all (some legit clients omit)
+    // A header IS present — from here on we fail CLOSED. A present-but-unparseable
+    // or host-less Origin (e.g. the literal "null" a sandboxed iframe sends) is
+    // treated as a cross-origin request, not waved through.
     $h = parse_url($candidate, PHP_URL_HOST);
-    if ($h === null || $h === false) return;
+    if ($h === null || $h === false || $h === '') {
+        pm_error('Cross-origin request blocked', 403);
+    }
     // Compare hosts (ignore port differences which proxies sometimes rewrite).
     $hostOnly = preg_replace('/:\d+$/', '', $host);
     if (strcasecmp($h, $hostOnly) !== 0) {
@@ -61,7 +71,13 @@ function pm_rate_limit(string $key, int $max, int $window): bool {
         $file = $dir . '/' . sha1($key) . '.json';
         $now = time();
         $fp = @fopen($file, 'c+');
-        if (!$fp) return true;
+        if (!$fp) {
+            // Fail OPEN (never lock out real users) but make the broken throttle
+            // visible to ops — otherwise brute-force protection silently vanishes
+            // when storage/ratelimit is not writable.
+            error_log('pm_rate_limit: cannot open ' . $file . ' (throttling disabled for this request)');
+            return true;
+        }
         @flock($fp, LOCK_EX);
         $raw = stream_get_contents($fp);
         $j = json_decode($raw ?: '', true);
@@ -74,10 +90,29 @@ function pm_rate_limit(string $key, int $max, int $window): bool {
         fwrite($fp, json_encode($data));
         @flock($fp, LOCK_UN);
         fclose($fp);
+        // Opportunistic GC: drop this key's file once its window has fully
+        // expired, so storage/ratelimit doesn't grow one file per IP forever.
+        pm_rate_limit_gc($dir, $now);
         return $allowed;
-    } catch (Throwable $_) {
+    } catch (Throwable $e) {
+        error_log('pm_rate_limit failed open: ' . $e->getMessage());
         return true;
     }
+}
+
+// Best-effort, occasional cleanup of expired rate-limit files so the directory
+// doesn't accumulate one JSON file per unique IP/email forever. Runs on ~2% of
+// calls (cheap) and only deletes files whose window has already reset.
+function pm_rate_limit_gc(string $dir, int $now): void {
+    try {
+        if (random_int(1, 50) !== 1) return;
+        foreach (glob($dir . '/*.json') ?: [] as $f) {
+            $j = json_decode(@file_get_contents($f) ?: '', true);
+            if (is_array($j) && isset($j['reset']) && (int)$j['reset'] <= $now) {
+                @unlink($f);
+            }
+        }
+    } catch (Throwable $_) { /* best effort */ }
 }
 
 // Best-effort client IP for throttling keys.

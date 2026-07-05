@@ -49,13 +49,19 @@ function pm_cf_project_exists(?int $projectId): void {
     if (!$proj) pm_error('Invalid project_id');
 }
 
-// ---- GET: list all field definitions (any authenticated user) ----------------
+// ---- GET: list field definitions (any authenticated user; readable only) ------
 if ($method === 'GET' && $id === null) {
-    $rows = pm_fetch_all(
-        'SELECT id, project_id, name, field_type, options_json, sort_order, archived
-         FROM custom_fields
-         ORDER BY sort_order, name'
-    );
+    // Hide field definitions scoped to private projects the caller can't read
+    // (their names alone can be sensitive, e.g. "Salary band"). Global
+    // (project_id IS NULL) fields stay visible to everyone.
+    $params = [];
+    $where = function_exists('pm_readable_project_where')
+        ? pm_readable_project_where($uid, 'project_id', $params) : '';
+    $sql = 'SELECT id, project_id, name, field_type, options_json, sort_order, archived
+            FROM custom_fields'
+        . ($where !== '' ? " WHERE $where" : '')
+        . ' ORDER BY sort_order, name';
+    $rows = pm_fetch_all($sql, $params);
     pm_json(['fields' => array_map('pm_cf_shape', $rows)]);
 }
 
@@ -174,7 +180,7 @@ if ($method === 'PUT') {
     $fieldId = pm_int_param('field_id');
     if (!$taskId || !$fieldId) pm_error('task_id and field_id required');
 
-    $field = pm_fetch_one('SELECT id FROM custom_fields WHERE id = ?', [$fieldId]);
+    $field = pm_fetch_one('SELECT id, field_type, options_json FROM custom_fields WHERE id = ?', [$fieldId]);
     if (!$field) pm_error('Field not found', 404);
     $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
@@ -183,6 +189,39 @@ if ($method === 'PUT') {
     $value = pm_param('value', null);
     if (is_array($value)) $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($value !== null) $value = (string)$value;
+
+    // Validate the value against the field's declared type so we never persist a
+    // value the corresponding view can't render (a 'number' holding "abc", a
+    // 'select' holding a non-option, an unparseable 'date', etc.).
+    if ($value !== null && $value !== '') {
+        switch ((string)$field['field_type']) {
+            case 'number':
+                if (!is_numeric($value)) pm_error('Value must be a number');
+                break;
+            case 'date':
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)
+                    || !checkdate((int)substr($value,5,2), (int)substr($value,8,2), (int)substr($value,0,4))) {
+                    pm_error('Value must be a valid YYYY-MM-DD date');
+                }
+                break;
+            case 'checkbox':
+                // Normalize any truthy/falsey input to a canonical '1'/'0'.
+                $value = in_array(strtolower($value), ['1','true','yes','on'], true) ? '1' : '0';
+                break;
+            case 'select': {
+                $opts = json_decode((string)($field['options_json'] ?? ''), true);
+                $opts = is_array($opts) ? array_map('strval', $opts) : [];
+                if (!in_array($value, $opts, true)) pm_error('Value is not one of the allowed options');
+                break;
+            }
+            case 'user': {
+                if (!ctype_digit($value)) pm_error('Value must be a user id');
+                $u = pm_fetch_one('SELECT id FROM users WHERE id = ?', [(int)$value]);
+                if (!$u) pm_error('Value must reference an existing user');
+                break;
+            }
+        }
+    }
 
     if ($value === null || $value === '') {
         // Empty value clears the field rather than storing a blank row.

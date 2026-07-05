@@ -42,7 +42,7 @@ function renderList(tasks, handlers) {
       Segmented('Group by', ls.groupBy, v => { ls.groupBy = v; redraw(); },
         [['status', 'Status'], ['project', 'Project'], ['assignee', 'Assignee']]),
       Segmented('Sort', ls.sortBy, v => { ls.sortBy = v; redraw(); },
-        [['priority', 'Priority'], ['due', 'Due'], ['title', 'Title']]),
+        [['priority', 'Priority'], ['due', 'Due'], ['title', 'Title'], ['manual', 'Manual']]),
       h('button', {
         class: 'btn btn-muted', title: ls.sortDir === 'asc' ? 'Ascending' : 'Descending',
         style: { padding: '5px 9px', fontSize: '12px' },
@@ -69,8 +69,16 @@ function renderList(tasks, handlers) {
     const dir = ls.sortDir === 'desc' ? -1 : 1;
     groups.forEach(g => g.tasks.sort((a, b) => {
       let r = 0;
-      if (ls.sortBy === 'priority') r = (a.priority ?? 99) - (b.priority ?? 99);
-      else if (ls.sortBy === 'due') r = new Date(a.due || '9999') - new Date(b.due || '9999');
+      if (ls.sortBy === 'manual') r = (a.position ?? 0) - (b.position ?? 0);
+      else if (ls.sortBy === 'priority') r = (a.priority ?? 99) - (b.priority ?? 99);
+      else if (ls.sortBy === 'due') {
+        // Sort by calendar day via parseISO (local-wall-clock, per the repo's
+        // date rule); undated tasks sort last. Avoids new Date('9999')'s
+        // engine-specific parsing of the bare sentinel.
+        const av = a.due ? parseISO(a.due).getTime() : Infinity;
+        const bv = b.due ? parseISO(b.due).getTime() : Infinity;
+        r = av - bv;
+      }
       else if (ls.sortBy === 'title') r = (a.title || '').localeCompare(b.title || '');
       return r * dir;
     }));
@@ -136,6 +144,7 @@ function renderList(tasks, handlers) {
         const rowEl = ListRow(t, {
           onOpen: onOpenTask,
           onToggleStatus,
+          manualSort: ls.sortBy === 'manual',
           selected: isSelected(t.id),
           onSelect: (on, ev) => {
             if (ev && ev.shiftKey && lastClickedId != null) {
@@ -160,7 +169,10 @@ function renderList(tasks, handlers) {
         rowEls.push(rowEl);
         tbl.appendChild(rowEl);
       }
-      wireReorder(g, rowEls);
+      // Drag-to-reorder only makes sense (and only sticks visually) when the
+      // list is sorted manually by position — otherwise the re-sort snaps the
+      // row back. The grip is likewise only rendered in manual mode.
+      if (ls.sortBy === 'manual') wireReorder(g, rowEls);
     }
 
     root.appendChild(tbl);
@@ -318,7 +330,7 @@ function milestonePickerContent(task, value, onChange, close) {
   return wrap;
 }
 
-function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, saveTask } = {}) {
+function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, saveTask, manualSort = false } = {}) {
   const proj = projectById(task.project);
   const sub = task.subtasks || [];
   const subDone = sub.filter(s => s.done).length;
@@ -334,7 +346,8 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
     onClick: () => onOpen(task.id),
     onKeydown: (e) => {
       if (e.key === 'Enter') { e.preventDefault(); onOpen(task.id); }
-      else if (e.key === ' ') { e.preventDefault(); onSelect?.(!selected, e); }
+      // Only writable rows are selectable (bulk actions on read-only rows 403).
+      else if (e.key === ' ' && canWrite) { e.preventDefault(); onSelect?.(!selected, e); }
     },
   });
 
@@ -352,20 +365,29 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
 
   // ----- check cell: drag grip + selection checkbox + status toggle -----
   // The grip is omitted entirely when read-only so wireReorder skips the row.
+  // The grip only appears in Manual sort (otherwise a re-sort snaps the row back,
+  // so offering it would be misleading). wireReorder is likewise manual-only.
+  const showGrip = canWrite && manualSort;
   const checkCell = h('div', { class: 'col-check hstack', style: { gap: '6px' }, onClick: (e) => e.stopPropagation() },
-    canWrite
+    showGrip
       ? h('span', { class: 'row-grip', title: 'Drag to reorder',
           style: { display: 'inline-flex', color: 'var(--fg-4)', cursor: 'grab' },
           onClick: (e) => e.stopPropagation() }, Icon('grip', 13))
       : h('span', { style: { display: 'inline-flex', width: '13px' } }),
     h('input', {
       type: 'checkbox', checked: selected,
+      // Read-only rows aren't selectable (bulk actions on them 403 server-side).
+      disabled: !canWrite,
+      'aria-label': 'Select task',
       onClick: e => e.stopPropagation(),
-      onChange: e => onSelect?.(!!e.target.checked, e),
+      onChange: canWrite ? (e => onSelect?.(!!e.target.checked, e)) : (e => e.preventDefault()),
     }),
     canWrite
-      ? h('div', { title: 'Toggle done', onClick: (e) => { e.stopPropagation(); onToggleStatus(task.id); } }, Checkbox(done))
-      : h('div', { title: done ? 'Done' : 'Not done', style: { display: 'inline-flex', cursor: 'default' }, onClick: (e) => e.stopPropagation() }, Checkbox(done)),
+      ? h('div', { title: 'Toggle done', role: 'checkbox', 'aria-checked': done ? 'true' : 'false',
+          tabindex: '0', 'aria-label': 'Mark task done',
+          onClick: (e) => { e.stopPropagation(); onToggleStatus(task.id); },
+          onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onToggleStatus(task.id); } } }, Checkbox(done))
+      : h('div', { title: done ? 'Done' : 'Not done', role: 'img', 'aria-label': done ? 'Done' : 'Not done', style: { display: 'inline-flex', cursor: 'default' }, onClick: (e) => e.stopPropagation() }, Checkbox(done)),
   );
   row.appendChild(checkCell);
 
