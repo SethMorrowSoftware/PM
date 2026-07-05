@@ -322,11 +322,12 @@ textarea:focus-visible,
 }
 .filters-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
 
-/* On common laptop widths (≤1450px, e.g. 1366 and 1440) the 9 labelled tabs +
-   filter pills don't fit on one line, so drop the tab text (icon + tooltip +
-   aria-label carry the meaning) to keep everything on a single clean row.
-   The flex-wrap above is the safety net for anything still too narrow. */
-@media (max-width: 1450px) {
+/* Keep the labelled view tabs on laptop/desktop widths — they're the primary
+   navigation and icons alone hurt discoverability. When the 9 tabs + filter
+   pills don't fit on one line the row wraps gracefully (flex-wrap above) into a
+   clean two-row toolbar. Only on genuinely narrow (tablet/small-window) widths
+   do we drop the tab text; the icon + tooltip + aria-label still carry meaning. */
+@media (max-width: 1024px) {
   .view-tab-label { display: none; }
   .view-tab { padding: 6px 8px; }
   .filters-sep { display: none; }
@@ -504,7 +505,7 @@ textarea:focus-visible,
 .cal-daynum { font-size: 11.5px; font-weight: 600; width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; color: var(--fg-1); }
 .cal-daynum.today { background: var(--acc-0); color: white; }
 .cal-cell.not-in-month .cal-daynum { color: var(--fg-4); }
-.cal-event { font-size: 11px; padding: 3px 6px; border-radius: 4px; cursor: pointer; overflow: hidden; white-space: nowrap; font-weight: 500; display: flex; align-items: center; min-width: 0; transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
+.cal-event { font-size: 11px; padding: 3px 6px; border-radius: 4px; cursor: pointer; overflow: hidden; white-space: nowrap; font-weight: 500; display: flex; align-items: center; min-width: 0; min-height: 20px; flex-shrink: 0; transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 .cal-event:hover { filter: brightness(1.12); transform: translateY(-0.5px); }
 .cal-event .icon { flex-shrink: 0; }
 .cal-event.done { text-decoration: line-through; opacity: 0.55; }
@@ -557,7 +558,7 @@ textarea:focus-visible,
 .settings-tab.active { background: var(--acc-soft); color: var(--acc-1); }
 .settings-tab.active .icon { color: var(--acc-1); }
 .settings-tab .icon { color: var(--fg-2); }
-.settings-body { overflow: auto; padding: 20px 24px; }
+.settings-body { overflow: auto; padding: 20px 24px; min-height: 0; min-width: 0; }
 
 .settings-section-head {
   display: flex; align-items: flex-start; justify-content: space-between;
@@ -903,6 +904,16 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   .filters { padding: 10px 12px; gap: 8px; overflow-x: auto; }
   .mobile-nav-toggle { display: grid; flex-shrink: 0; }
   .mobile-nav-scrim { z-index: 85; border: 0; width: 100%; }
+
+  /* Settings: stack the section rail above the body as a horizontal strip so it
+     doesn't eat the narrow width. */
+  .settings-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .settings-tabs {
+    flex-direction: row; overflow-x: auto; overflow-y: hidden;
+    border-right: none; border-bottom: 1px solid var(--line);
+    padding: 8px 10px; gap: 4px;
+  }
+  .settings-tab { white-space: nowrap; flex-shrink: 0; }
 }
 
 @media (min-width: 981px) {

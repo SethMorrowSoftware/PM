@@ -11,6 +11,10 @@ Thumbs.db
 *.swp
 *~
 
+# One-time migration payload (contains internal task data) — deliver separately,
+# never commit. The importer script (import_monday.php) IS tracked; the data isn't.
+monday_export.json
+
 # NOTE: api/config.php is intentionally tracked as a placeholder template
 # (see CLAUDE.md). Do NOT commit real cPanel DB credentials into it — edit it
 # on the server after deploy, and keep the in-repo copy on placeholder values.
