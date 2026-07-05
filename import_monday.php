@@ -107,6 +107,58 @@ function imp_dt(?string $s): ?string {
     return (is_string($s) && preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $s)) ? $s : null;
 }
 
+// ---- recurring-checklist conversion helpers --------------------------------
+// monday groups that are really recurring routines become recurring RULES
+// (spawning a fresh task with an unchecked subtask checklist each period)
+// instead of a milestone full of never-finishing static tasks.
+
+// Next calendar date (today or later) that falls on the given weekday, 0=Sun.
+function imp_next_weekday(int $dow): string {
+    for ($i = 0; $i < 8; $i++) {
+        $d = strtotime("+$i day");
+        if ((int) date('w', $d) === $dow) return date('Y-m-d', $d);
+    }
+    return date('Y-m-d');
+}
+
+// First occurrence for a cadence config; used as the rule's next_run AND the
+// due date of the initial instance the importer spawns.
+function imp_first_occurrence(array $rc): string {
+    switch ($rc['cadence']) {
+        case 'weekly':  return imp_next_weekday((int) ($rc['weekday'] ?? 1));
+        case 'monthly': return date('Y-m-d', strtotime('first day of next month'));
+        case 'yearly':  return date('Y-01-01', strtotime('+1 year'));
+    }
+    return date('Y-m-d');
+}
+
+// Advance one period past $ymd (interval is always 1 for imported rules).
+function imp_advance(string $ymd, array $rc): string {
+    $ts = strtotime($ymd) ?: time();
+    switch ($rc['cadence']) {
+        case 'weekly':  return date('Y-m-d', strtotime('+7 day', $ts));
+        case 'monthly': {
+            $t2 = strtotime('first day of next month', $ts);
+            $md = (int) ($rc['month_day'] ?? (int) date('d', $ts));
+            return date('Y-m-', $t2) . str_pad((string) min($md, (int) date('t', $t2)), 2, '0', STR_PAD_LEFT);
+        }
+        case 'yearly':  return date('Y-m-d', strtotime('+1 year', $ts));
+    }
+    return date('Y-m-d', strtotime('+7 day', $ts));
+}
+
+// Cadence for an item in the catch-all "Checklists" group, inferred from its
+// title. Returns null when there is no schedule — those become on-demand task
+// TEMPLATES instead (apply from the task-template picker whenever needed).
+function imp_checklist_cadence(string $title): ?array {
+    $t = mb_strtolower($title);
+    if (str_contains($t, 'monthly')) return ['cadence' => 'monthly', 'month_day' => 1];
+    if (str_contains($t, 'yearly'))  return ['cadence' => 'yearly', 'month_of_year' => 1, 'month_day' => 1];
+    if (str_contains($t, 'weekend')) return ['cadence' => 'weekly', 'weekday' => 5];
+    if (str_contains($t, 'week'))    return ['cadence' => 'weekly', 'weekday' => 1];
+    return null;
+}
+
 /**
  * Runs the whole migration inside ONE transaction: if anything fails, the
  * database is left exactly as it was (safe to retry). Returns a summary.
@@ -152,17 +204,50 @@ function imp_run(array $data, int $adminId): array {
             $projectId = pm_last_id();
         }
 
-        // 3) Replace semantics: wipe THIS project's tasks + milestones only.
-        //    Deleting tasks cascades their subtasks/assignees/comments (FKs).
+        // 3) Replace semantics: wipe THIS project's tasks, milestones, recurring
+        //    rules, and task templates only. Deleting tasks cascades their
+        //    subtasks/assignees/comments (FKs).
         pm_exec('DELETE FROM tasks WHERE project_id = ?', [$projectId]);
         pm_exec('DELETE FROM milestones WHERE project_id = ?', [$projectId]);
+        pm_exec('DELETE FROM recurring_rules WHERE project_id = ?', [$projectId]);
+        pm_exec('DELETE FROM task_templates WHERE project_id = ?', [$projectId]);
 
-        // 4) Recreate milestones (one per monday group), preserving order.
+        // 3b) Classify monday groups. Not every group is a milestone:
+        //     • recurring-routine groups  -> recurring RULES (fresh task each period)
+        //     • the catch-all "Checklists" group -> rules (scheduled) or task
+        //       TEMPLATES (unscheduled reference lists, applied on demand)
+        //     • personal groups (Dylan/Seth/Izzy) -> plain tasks ASSIGNED to that
+        //       person (that's what My Tasks is for), no milestone
+        //     • everything else -> a milestone, as before
+        $firstNameToUid = [];
+        foreach (($data['users'] ?? []) as $u) {
+            $email = strtolower(trim((string) ($u['email'] ?? '')));
+            $first = strtolower((string) strtok(trim((string) ($u['name'] ?? '')), ' '));
+            if ($first !== '' && isset($emailToId[$email])) $firstNameToUid[$first] = $emailToId[$email];
+        }
+        $recurringGroups = [
+            'FRIDAY CHECKLIST'                => ['title_prefix' => 'Friday checklist', 'cadence' => 'weekly', 'weekday' => 5],
+            'Weekly Facility Checks'          => ['title_prefix' => 'Weekly facility check', 'cadence' => 'weekly', 'weekday' => 1],
+            'Izzy Saturday Morning Checklist' => ['title_prefix' => 'Saturday morning checklist', 'cadence' => 'weekly', 'weekday' => 6,
+                                                  'assignee_uid' => $firstNameToUid['izzy'] ?? null],
+        ];
+        $checklistCatchall = 'Checklists';
+        // A group named after a teammate's first name (Dylan / Seth / Izzy /
+        // Mars…) is that person's to-do bucket, not a milestone.
+        $personalGroups = [];
+        foreach (($data['milestones'] ?? []) as $g) {
+            $g = trim((string) $g);
+            if ($g !== '' && isset($firstNameToUid[strtolower($g)])) $personalGroups[$g] = $firstNameToUid[strtolower($g)];
+        }
+        $nonMilestoneGroups = array_merge(array_keys($recurringGroups), [$checklistCatchall], array_keys($personalGroups));
+
+        // 4) Recreate milestones for the remaining groups, preserving order.
         $msByTitle = [];
         $mi = 0;
         foreach (($data['milestones'] ?? []) as $title) {
             $title = trim((string) $title);
             if ($title === '' || isset($msByTitle[$title])) continue;
+            if (in_array($title, $nonMilestoneGroups, true)) continue;
             pm_exec('INSERT INTO milestones (project_id, name, sort_order) VALUES (?,?,?)', [$projectId, $title, ++$mi]);
             $msByTitle[$title] = pm_last_id();
         }
@@ -174,6 +259,9 @@ function imp_run(array $data, int $adminId): array {
         $posByStatus = [];
         $tCount = $sCount = $cCount = $aCount = 0;
         $unmatchedAssignees = 0;
+        $pendingRules = [];
+        $pendingTemplates = [];
+        $seenRuleKeys = [];
 
         foreach ($data['tasks'] as $t) {
             $title = trim((string) ($t['title'] ?? ''));
@@ -185,7 +273,48 @@ function imp_run(array $data, int $adminId): array {
             $due    = (!empty($t['due']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $t['due'])) ? $t['due'] : null;
             $desc   = trim((string) ($t['description'] ?? ''));
             $desc   = $desc === '' ? null : mb_substr($desc, 0, 20000);
-            $msId   = (!empty($t['milestone']) && isset($msByTitle[$t['milestone']])) ? $msByTitle[$t['milestone']] : null;
+            $grp    = trim((string) ($t['milestone'] ?? ''));
+
+            // Recurring-routine groups: divert into a rule instead of a task.
+            $ruleCfg = $recurringGroups[$grp] ?? null;
+            if ($ruleCfg === null && $grp === $checklistCatchall) {
+                $ruleCfg = imp_checklist_cadence($title);
+                if ($ruleCfg !== null) {
+                    // Standalone cadence words make bad task titles ("Monthly").
+                    if (preg_match('/^(monthly|weekly|yearly)$/i', $title)) $title .= ' checklist';
+                } else {
+                    // Unscheduled reference checklist -> on-demand task template.
+                    $pendingTemplates[] = [
+                        'name'     => mb_substr($title, 0, 120),
+                        'title'    => $title,
+                        'desc'     => $desc,
+                        'priority' => $prio,
+                        'subtasks' => array_values(array_filter(array_map(
+                            fn ($st) => trim((string) ($st['text'] ?? '')), $t['subtasks'] ?? []))),
+                    ];
+                    continue;
+                }
+            }
+            if ($ruleCfg !== null) {
+                $ruleTitle = isset($ruleCfg['title_prefix']) ? $ruleCfg['title_prefix'] . ' — ' . $title : $title;
+                $key = strtolower($grp . '|' . $ruleTitle);
+                if (isset($seenRuleKeys[$key])) continue;    // monday had a few duplicate rows
+                $seenRuleKeys[$key] = true;
+                $pendingRules[] = [
+                    'title'    => mb_substr($ruleTitle, 0, 500),
+                    'desc'     => $desc,
+                    'priority' => $prio,
+                    'cfg'      => $ruleCfg,
+                    'assignees'=> !empty($ruleCfg['assignee_uid']) ? [(int) $ruleCfg['assignee_uid']] : [],
+                    'subtasks' => array_values(array_filter(array_map(
+                        fn ($st) => trim((string) ($st['text'] ?? '')), $t['subtasks'] ?? []))),
+                ];
+                continue;
+            }
+
+            // Personal groups: plain task assigned to that person, no milestone.
+            $personalUid = $personalGroups[$grp] ?? null;
+            $msId = ($personalUid === null && $grp !== '' && isset($msByTitle[$grp])) ? $msByTitle[$grp] : null;
             $pos    = ($posByStatus[$status] = ($posByStatus[$status] ?? 0) + 1);
             $created = imp_dt($t['created_at'] ?? null) ?? date('Y-m-d H:i:s');
             $ref    = TARGET_PROJECT_PREFIX . '-' . ($refN++);
@@ -197,6 +326,11 @@ function imp_run(array $data, int $adminId): array {
             );
             $taskId = pm_last_id();
             $tCount++;
+
+            if ($personalUid !== null) {
+                pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$taskId, $personalUid]);
+                $aCount++;
+            }
 
             $seenA = [];
             foreach (($t['assignee_emails'] ?? []) as $ae) {
@@ -232,6 +366,68 @@ function imp_run(array $data, int $adminId): array {
             }
         }
 
+        // 6) Create the recurring rules and spawn each rule's FIRST instance.
+        //    (The app only auto-spawns on rule creation via the API or when a
+        //    previous instance is completed — rules inserted here need their
+        //    opening task or the chain would never start.)
+        $ruleRows = [];
+        foreach ($pendingRules as $pr) {
+            $rc = $pr['cfg'];
+            $firstDue = imp_first_occurrence($rc);
+            pm_exec(
+                'INSERT INTO recurring_rules
+                    (project_id, title, description, priority, assignees, subtasks_json,
+                     cadence, interval_n, weekday, month_day, month_of_year, next_run, created_by)
+                 VALUES (?,?,?,?,?,?,?,1,?,?,?,?,?)',
+                [
+                    $projectId, $pr['title'], $pr['desc'], $pr['priority'],
+                    $pr['assignees'] ? json_encode($pr['assignees']) : null,
+                    $pr['subtasks'] ? json_encode($pr['subtasks'], JSON_UNESCAPED_UNICODE) : null,
+                    $rc['cadence'],
+                    $rc['weekday'] ?? null, $rc['month_day'] ?? null, $rc['month_of_year'] ?? null,
+                    $firstDue, $adminId,
+                ]
+            );
+            $ruleId = pm_last_id();
+
+            $pos = ($posByStatus['todo'] = ($posByStatus['todo'] ?? 0) + 1);
+            $ref = TARGET_PROJECT_PREFIX . '-' . ($refN++);
+            pm_exec(
+                'INSERT INTO tasks (ref, project_id, status, title, description, priority, due, position, recurring_rule_id, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)',
+                [$ref, $projectId, 'todo', $pr['title'], $pr['desc'], $pr['priority'], $firstDue, $pos, $ruleId, $adminId]
+            );
+            $tid = pm_last_id();
+            $so = 0;
+            foreach ($pr['subtasks'] as $stText) {
+                pm_exec('INSERT INTO subtasks (task_id, text, done, sort_order) VALUES (?,?,0,?)',
+                    [$tid, mb_substr($stText, 0, 500), ++$so]);
+                $sCount++;
+            }
+            foreach ($pr['assignees'] as $uid) {
+                pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$tid, $uid]);
+                $aCount++;
+            }
+            pm_exec('UPDATE recurring_rules SET next_run = ?, last_task_id = ? WHERE id = ?',
+                [imp_advance($firstDue, $rc), $tid, $ruleId]);
+            $tCount++;
+            $ruleRows[] = ['title' => $pr['title'], 'cadence' => $rc['cadence'], 'first' => $firstDue,
+                           'steps' => count($pr['subtasks'])];
+        }
+
+        // 7) On-demand reference checklists -> task templates.
+        foreach ($pendingTemplates as $pt) {
+            pm_exec(
+                'INSERT INTO task_templates (project_id, name, title, description, priority, default_status, subtasks_json, created_by)
+                 VALUES (?,?,?,?,?,?,?,?)',
+                [
+                    $projectId, $pt['name'], $pt['title'], $pt['desc'], $pt['priority'], 'todo',
+                    $pt['subtasks'] ? json_encode($pt['subtasks'], JSON_UNESCAPED_UNICODE) : null,
+                    $adminId,
+                ]
+            );
+        }
+
         $pdo->commit();
 
         return [
@@ -242,6 +438,8 @@ function imp_run(array $data, int $adminId): array {
             'assignees'           => $aCount,
             'unmatched_assignees' => $unmatchedAssignees,
             'milestones'          => count($msByTitle),
+            'rules'               => $ruleRows,
+            'templates'           => count($pendingTemplates),
             'created_users'       => $createdUsers,
         ];
     } catch (Throwable $e) {
@@ -300,7 +498,8 @@ a{ color:#7a90ff; }
         <div class="kpi"><b><?= (int) $preview['milestones'] ?></b><small>milestones</small></div>
         <div class="kpi"><b><?= (int) $preview['users'] ?></b><small>teammates</small></div>
       </div>
-      <div class="warn">Running this will <strong>delete every task currently in the "<?= e(TARGET_PROJECT_NAME) ?>" project</strong> and replace them with the import. It does not affect any other project. Missing teammates are created with temporary passwords (shown after import).</div>
+      <div class="warn">Running this will <strong>delete every task, milestone, recurring rule, and task template currently in the "<?= e(TARGET_PROJECT_NAME) ?>" project</strong> and replace them with the import. It does not affect any other project. Missing teammates are created with temporary passwords (shown after import).</div>
+      <div class="warn">Checklist groups (Friday checklist, Weekly Facility Checks, Saturday morning, Monthly/Yearly…) are converted into <strong>recurring rules</strong> that spawn a fresh task with unchecked subtasks each period — they will NOT appear as milestones. The Dylan/Seth/Izzy groups become <strong>personal task assignments</strong> instead of milestones.</div>
       <?php if ($isAdmin): ?>
       <form method="post">
         <label>Type <code>IMPORT MONDAY</code> to confirm:</label>
@@ -318,7 +517,19 @@ a{ color:#7a90ff; }
         <div class="kpi"><b><?= (int) $summary['comments'] ?></b><small>comments</small></div>
         <div class="kpi"><b><?= (int) $summary['assignees'] ?></b><small>assignments</small></div>
         <div class="kpi"><b><?= (int) $summary['milestones'] ?></b><small>milestones</small></div>
+        <div class="kpi"><b><?= count($summary['rules'] ?? []) ?></b><small>recurring rules</small></div>
+        <div class="kpi"><b><?= (int) ($summary['templates'] ?? 0) ?></b><small>task templates</small></div>
       </div>
+      <?php if (!empty($summary['rules'])): ?>
+        <h2>Recurring checklists created</h2>
+        <p class="sub">Each spawns a fresh task (with its steps as unchecked subtasks) on schedule; the first instance is already on the board with the due date shown. Adjust any of these under Settings → Recurring rules.</p>
+        <table style="margin-bottom:14px">
+          <tr><th>Rule</th><th>Cadence</th><th>Steps</th><th>First due</th></tr>
+          <?php foreach ($summary['rules'] as $r): ?>
+            <tr><td><?= e($r['title']) ?></td><td><?= e($r['cadence']) ?></td><td><?= (int) $r['steps'] ?></td><td><code><?= e($r['first']) ?></code></td></tr>
+          <?php endforeach; ?>
+        </table>
+      <?php endif; ?>
       <?php if (!empty($summary['created_users'])): ?>
         <div class="warn"><strong>New teammate accounts</strong> — share these temporary passwords; each person can change it under Profile after signing in.</div>
         <table>

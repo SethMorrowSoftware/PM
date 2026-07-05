@@ -227,6 +227,7 @@ function pm_install_schema(): void {
             estimate VARCHAR(32) NULL,
             assignees TEXT NULL,
             labels TEXT NULL,
+            subtasks_json TEXT NULL,
             cadence VARCHAR(16) NOT NULL DEFAULT 'weekly',
             interval_n INT NOT NULL DEFAULT 1,
             weekday TINYINT NULL,
@@ -482,6 +483,7 @@ function pm_install_schema(): void {
     pm_migrate_add_column_if_missing('labels',   'project_id',    'INT NULL');
     pm_migrate_add_column_if_missing('labels',   'archived',      'TINYINT(1) NOT NULL DEFAULT 0');
     pm_migrate_add_column_if_missing('tasks',    'recurring_rule_id', 'INT NULL');
+    pm_migrate_add_column_if_missing('recurring_rules', 'subtasks_json', 'TEXT NULL');
     pm_migrate_add_index_if_missing('labels', 'idx_lbl_project', '(project_id)');
     pm_migrate_add_index_if_missing('tasks',  'idx_recurring',   '(recurring_rule_id)');
     pm_migrate_add_column_if_missing('comments', 'updated_at',   'TIMESTAMP NULL');

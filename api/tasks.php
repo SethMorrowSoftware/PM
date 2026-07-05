@@ -1372,6 +1372,18 @@ function pm_generate_next_recurring_task(int $ruleId, ?int $completedTaskId = nu
             if (is_array($labels)) foreach ($labels as $lid) {
                 pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$tid, (int)$lid]);
             }
+            // Materialize the rule's checklist as fresh (unchecked) subtasks —
+            // same format as recurring.php (JSON array of title strings).
+            $stList = json_decode((string)($rule['subtasks_json'] ?? ''), true);
+            if (is_array($stList)) {
+                $order = 0;
+                foreach ($stList as $stText) {
+                    $stText = trim((string)$stText);
+                    if ($stText === '') continue;
+                    pm_exec('INSERT INTO subtasks (task_id, text, done, sort_order) VALUES (?,?,0,?)',
+                        [$tid, mb_substr($stText, 0, 500), $order++]);
+                }
+            }
             pm_exec(
                 'UPDATE recurring_rules SET next_run = ?, last_task_id = ?, occurrences_left = ? WHERE id = ?',
                 [$nextAfter, $tid, $occLeft, $ruleId]
