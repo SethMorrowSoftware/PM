@@ -49,8 +49,16 @@
     customFields: [],
     templates: [],
     goals: [],
-    // theme: explicit user choice ('dark'|'light'); null = follow OS
-    theme: localStorage.getItem('pm_theme') || 'dark',
+    // theme: initialize from the RESOLVED theme so ThemeToggle reflects what's
+    // actually on screen. An explicit saved choice wins; otherwise follow the OS
+    // (matching the CSS, which uses prefers-color-scheme when no data-theme is
+    // set). Without this, an OS-light first-run showed the light UI but held
+    // theme:'dark', so the first toggle click appeared to do nothing.
+    theme: (function () {
+      const s = localStorage.getItem('pm_theme');
+      if (s === 'light' || s === 'dark') return s;
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+    })(),
     density: localStorage.getItem('pm_density') === 'compact' ? 'compact' : 'comfortable',
     // view-local UI state, LIFTED here so it survives full re-renders
     ui: {
@@ -63,6 +71,9 @@
       dashboard: { customizing: false },
     },
   };
+  // The app has finished its initial auth check + data load. From here on a 401
+  // means the session expired mid-use, so api.js may redirect to login.
+  window.__pmBooted = true;
   // Apply persisted theme immediately (index.html also sets it pre-paint).
   try {
     const savedTheme = localStorage.getItem('pm_theme');
@@ -102,13 +113,11 @@
       }
       return;
     }
-    const exists = state.tasks.some(t => t.id === hashId);
-    if (!exists) {
-      if (state.openTaskId !== null) {
-        state.openTaskId = null;
-        renderApp();
-      }
-      setTaskHash(null);
+    // A deep-linked task may not be in the bulk-loaded set (large/paginated
+    // workspace). Fetch it on demand via openTaskById rather than silently
+    // dropping the hash and refusing to open it.
+    if (!state.tasks.some(t => t.id === hashId)) {
+      if (typeof openTaskById === 'function') openTaskById(hashId);
       return;
     }
     if (state.openTaskId !== hashId) {
@@ -165,6 +174,11 @@
   function toggleTheme() {
     state.theme = state.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = state.theme;
+    // Keep the mobile browser chrome / PWA color in sync with the chosen theme.
+    try {
+      const tc = document.querySelector('meta[name="theme-color"]:not([media])');
+      if (tc) tc.setAttribute('content', state.theme === 'light' ? '#F6F8FB' : '#0B0F17');
+    } catch { /* ignore */ }
     try { localStorage.setItem('pm_theme', state.theme); } catch { /* ignore */ }
     renderApp();
   }
@@ -187,8 +201,24 @@
   setInterval(() => {
     if (state.openTaskId || state.quickAddOpen || state.profileOpen ||
         state.settingsOpen || state.shortcutsOpen) return;
+    // Also skip while an open popover/picker or the notification dropdown is on
+    // screen — a full renderApp() would detach its anchor and mis-position it.
+    if (document.querySelector('.popover') || state.notifOpen) return;
     loadNotifications();
   }, 60000);
+
+  // Single global Escape handler for the hand-built overlays (quick-add,
+  // profile, settings). Installed ONCE here rather than per-render so it can't
+  // leak duplicate listeners. Closes the topmost overlay; defers to any open
+  // popover (which has its own Esc) so a first Esc dismisses the popover and a
+  // second closes the modal. The modal() helper manages its own dialogs.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (document.querySelector('.popover')) return;
+    if (state.settingsOpen) { state.settingsOpen = false; renderApp(); }
+    else if (state.profileOpen) { state.profileOpen = false; renderApp(); }
+    else if (state.quickAddOpen) { state.quickAddOpen = false; state.quickAddDefaults = null; renderApp(); }
+  });
 
   // Exposed so view modules / the task drawer can refresh shared data.
   window.pmRefreshTasks = () => refreshTasks();
@@ -335,7 +365,11 @@
   // Export the currently-filtered tasks to a CSV download (client-side, no deps).
   function exportTasksCsv(tasks) {
     const esc = v => {
-      const s = v == null ? '' : String(v);
+      let s = v == null ? '' : String(v);
+      // Neutralize spreadsheet formula injection: a cell a user controls (e.g. a
+      // task titled =HYPERLINK(...)) would otherwise execute when the CSV is
+      // opened in Excel/Sheets. Prefix leading =,+,-,@,tab,CR with a single quote.
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
       return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
     const headers = ['Ref', 'Title', 'Project', 'Status', 'Priority', 'Assignees', 'Labels',
@@ -415,6 +449,24 @@
     else document.getElementById('global-search')?.focus();
   }
   window.pmOpenCommandPalette = () => openCmd();
+
+  // Make a non-<button> clickable element operable by keyboard: adds a button
+  // role, puts it in the tab order, and triggers on Enter/Space. Spread into an
+  // h() props object: h('div', clickable(fn, {class:'nav-item'}), ...).
+  function clickable(onActivate, extra = {}) {
+    return {
+      role: 'button', tabindex: '0',
+      onClick: onActivate,
+      onKeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          e.preventDefault();
+          onActivate(e);
+        }
+      },
+      ...extra,
+    };
+  }
+  window.pmClickable = clickable;
 
   // ----- render root -----
   function renderApp() {
@@ -506,15 +558,16 @@
     for (const p of state.projects) {
       const count = state.tasks.filter(t => t.project == p.id && t.status !== 'done').length;
       const isActive = state.filterProject == p.id;
-      const row = h('div', {
-        class: 'nav-proj' + (isActive ? ' active' : ''),
-        onClick: () => {
+      const row = h('div', clickable(() => {
           state.filterProject = isActive ? null : p.id;
           if (state.view === 'dashboard') state.view = 'kanban';
           if (window.innerWidth <= 980) state.mobileSidebarOpen = false;
           persist(); renderApp();
-        },
-      },
+        }, {
+        class: 'nav-proj' + (isActive ? ' active' : ''),
+        'aria-pressed': isActive ? 'true' : 'false',
+        'aria-label': 'Filter by project ' + p.name,
+      }),
         h('span', { class: 'proj-dot', style: { background: p.color } }),
         h('span', { class: 'proj-name' }, p.name),
         p.visibility === 'private' ? Icon('lock', 11, 1.75, 'proj-lock') : null,
@@ -529,12 +582,11 @@
     const labelSection = h('div', { class: 'nav-section' });
     labelSection.appendChild(h('div', { class: 'nav-label' }, 'Labels'));
     for (const l of state.labels.slice(0, 5)) {
-      labelSection.appendChild(h('div', { class: 'nav-item', style: { padding: '5px 10px' },
-        onClick: () => {
+      labelSection.appendChild(h('div', clickable(() => {
           state.filterLabels = [l.id]; state.view = 'list';
           if (window.innerWidth <= 980) state.mobileSidebarOpen = false;
           persist(); renderApp();
-        } },
+        }, { class: 'nav-item', style: { padding: '5px 10px' }, 'aria-label': 'Filter by label ' + l.name }),
         h('span', {
           style: {
             width: '10px', height: '10px', padding: 0, borderRadius: '3px',
@@ -569,7 +621,11 @@
       onClick();
       if (window.innerWidth <= 980) state.mobileSidebarOpen = false;
     };
-    const el = h('div', { class: 'nav-item' + (active ? ' active' : ''), onClick: wrappedClick },
+    const el = h('div', clickable(wrappedClick, {
+      class: 'nav-item' + (active ? ' active' : ''),
+      'aria-current': active ? 'page' : null,
+      'aria-label': label,
+    }),
       Icon(icon, 15),
       h('span', null, label),
     );
@@ -669,16 +725,17 @@
         wrap.appendChild(h('div', { class: 'empty', style: { padding: '24px 16px' } }, "You're all caught up."));
       }
       for (const n of state.notifications) {
-        wrap.appendChild(h('div', {
+        const openNotif = async () => {
+          if (!n.is_read) { try { await API.markNotificationRead(n.id); } catch { /* ignore */ } }
+          close();
+          await loadNotifications();
+          // Use openTaskById so a notification for a task outside the bulk-loaded
+          // set still opens (it fetches on demand) instead of silently no-opping.
+          if (n.task_id) { await openTaskById(n.task_id); }
+        };
+        wrap.appendChild(h('div', clickable(openNotif, {
           class: 'notif-item' + (n.is_read ? '' : ' unread'),
-          onClick: async () => {
-            if (!n.is_read) { try { await API.markNotificationRead(n.id); } catch { /* ignore */ } }
-            close();
-            if (n.task_id) { state.openTaskId = n.task_id; setTaskHash(n.task_id); }
-            await loadNotifications();
-            renderApp();
-          },
-        },
+        }),
           n.actor ? Avatar(n.actor, 26) : h('span', { class: 'notif-ico' }, Icon('bell', 14)),
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { fontSize: '12.5px', color: 'var(--fg-1)' } }, n.body || n.type),
@@ -711,6 +768,7 @@
     search.appendChild(Icon('search', 14, 1.75, ''));
     const input = h('input', {
       id: 'global-search', placeholder: 'Search tasks...', value: state.search,
+      'aria-label': 'Search tasks', type: 'search',
       onInput: e => { state.search = e.target.value; renderMainContent(); },
     });
     search.appendChild(input);
@@ -891,7 +949,7 @@
     const frag = document.createDocumentFragment();
     const scrim = h('div', { class: 'scrim', onClick: close });
     frag.appendChild(scrim);
-    const modal = h('div', { class: 'modal' });
+    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New task' });
     frag.appendChild(modal);
 
     function close() {
@@ -899,9 +957,17 @@
       state.quickAddDefaults = null;
       scrim.remove(); modal.remove();
     }
+    let submitting = false;
     async function submit() {
       const title = form.title.trim();
       if (!title) return;
+      // Guard against double-submit (fast double-Enter, or Enter + Create click)
+      // which would otherwise create duplicate tasks — both calls read a valid
+      // title before either resolves. Also disable the button while in flight.
+      if (submitting) return;
+      submitting = true;
+      const btn = modal.querySelector('.btn-primary');
+      if (btn) btn.disabled = true;
       try {
         const t = await createTask({
           title, status: form.status, project: form.project,
@@ -922,7 +988,12 @@
         // clicking a card.
         setTaskHash(t.id);
         renderApp();
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        toast(e.message, 'error');
+        // Re-enable so the user can retry after a failure.
+        submitting = false;
+        if (btn) btn.disabled = false;
+      }
     }
 
     function applyTemplate(tpl) {
@@ -1038,7 +1109,7 @@
     };
     const frag = document.createDocumentFragment();
     const scrim = h('div', { class: 'scrim', onClick: close });
-    const modal = h('div', { class: 'modal' });
+    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Profile & preferences' });
     frag.appendChild(scrim);
     frag.appendChild(modal);
 
@@ -1210,7 +1281,7 @@
 
     const frag = document.createDocumentFragment();
     const scrim = h('div', { class: 'scrim', onClick: close });
-    const modal = h('div', { class: 'settings-modal' });
+    const modal = h('div', { class: 'settings-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Admin settings' });
     frag.appendChild(scrim);
     frag.appendChild(modal);
 
@@ -1589,10 +1660,14 @@
         toast('No compatible label available in this scope to merge into', 'error');
         return;
       }
-      const options = siblings.map(l => `${l.id}: ${l.name}`).join('\n');
-      const raw = prompt(`Merge "${source.name}" into which label id?\n${options}`);
+      // Accessible, themed dialog instead of native prompt() (per CLAUDE.md).
+      const raw = await promptDialog({
+        title: `Merge "${source.name}" into…`,
+        label: 'Enter the target label id — options: ' + siblings.map(l => `${l.id} (${l.name})`).join(', '),
+        placeholder: 'e.g. ' + siblings[0].id,
+      });
       if (!raw) return;
-      const targetId = Number(raw);
+      const targetId = Number(String(raw).trim());
       if (!targetId) return;
       try {
         await API.post(`labels.php?id=${source.id}&action=merge&target_id=${targetId}`, {});
@@ -1999,14 +2074,23 @@
   }
 
   // ----- keyboard shortcuts help -----
+  let shortcutsKeyHandler = null;
   function renderShortcutsHelp() {
     const frag = document.createDocumentFragment();
     const scrim = h('div', { class: 'scrim', onClick: close });
-    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', style: { maxWidth: '460px' } });
+    const modal = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard & shortcuts', style: { maxWidth: '460px' } });
     frag.appendChild(scrim);
     frag.appendChild(modal);
-    function close() { state.shortcutsOpen = false; scrim.remove(); modal.remove(); document.removeEventListener('keydown', onKey); }
+    function close() {
+      state.shortcutsOpen = false; scrim.remove(); modal.remove();
+      if (shortcutsKeyHandler) { document.removeEventListener('keydown', shortcutsKeyHandler); shortcutsKeyHandler = null; }
+    }
+    // renderApp() re-invokes this on every re-render while shortcutsOpen is true;
+    // remove any handler from a prior render before adding a fresh one so they
+    // don't stack up on document.
+    if (shortcutsKeyHandler) document.removeEventListener('keydown', shortcutsKeyHandler);
     const onKey = e => { if (e.key === 'Escape') close(); };
+    shortcutsKeyHandler = onKey;
     document.addEventListener('keydown', onKey);
     const mod = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
     const rows = [

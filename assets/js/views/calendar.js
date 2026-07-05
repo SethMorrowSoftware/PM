@@ -43,7 +43,21 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
     if (!cell || !taskId) return;
     const iso = cell.dataset.iso;
     try {
-      await onMoveTaskDate?.(taskId, iso);
+      const task = tasks.find(t => t.id == taskId);
+      // Spanning task (start_date before due): shift BOTH ends by the drop delta
+      // so the duration is preserved and we never invert into due < start_date
+      // (which the old "move due only" behavior could produce). Matches Timeline.
+      if (task && task.start_date && task.due && task.start_date < task.due) {
+        const deltaDays = Math.round((parseISO(iso) - parseISO(task.due)) / 86400000);
+        if (deltaDays !== 0) {
+          const ns = ymd(new Date(parseISO(task.start_date).getTime() + deltaDays * 86400000));
+          const nd = ymd(new Date(parseISO(task.due).getTime() + deltaDays * 86400000));
+          await API.updateTask(taskId, { start_date: ns, due: nd });
+          window.pmRefreshTasks?.();
+        }
+      } else {
+        await onMoveTaskDate?.(taskId, iso);
+      }
     } catch (err) {
       toast((err && err.message) || 'Could not reschedule task', 'error');
     }
@@ -53,9 +67,16 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
   // pushes a cleanup. `el` is the rendered event/chip, `taskId` the task it moves.
   function wireDrag(el, taskId) {
     el.style.touchAction = 'none';
+    // Suppress the synthetic click that follows a mouse drag (makeDraggable only
+    // prevents it for touch), so dragging an event to a new day doesn't ALSO open
+    // the task drawer. The capture-phase listener runs before the bubbling onClick.
+    let dragged = false;
+    el.addEventListener('click', (e) => {
+      if (dragged) { e.stopImmediatePropagation(); e.preventDefault(); dragged = false; }
+    }, true);
     cleanups.push(makeDraggable(el, {
-      onStart: () => { el.classList.add('dragging'); },
-      onMove: (e) => { highlightAt(e.clientX, e.clientY); },
+      onStart: () => { dragged = false; el.classList.add('dragging'); },
+      onMove: (e) => { dragged = true; highlightAt(e.clientX, e.clientY); },
       onDrop: (e) => { el.classList.remove('dragging'); dropAt(e.clientX, e.clientY, taskId); },
     }));
   }
@@ -118,7 +139,7 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         role: 'button',
         title: t.title + (t.comments ? ` · ${t.comments} comment${t.comments === 1 ? '' : 's'}` : ''),
         style: proj ? {
-          background: proj.color + '18', color: proj.color,
+          background: proj.color + '18', color: 'var(--fg-1)',
           borderLeft: '2px solid ' + proj.color
         } : {},
         onClick: (e) => { e.stopPropagation(); onOpenTask(t.id); },
@@ -150,7 +171,7 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         role: 'button',
         title: t.title + ` (${t.start_date} → ${t.due})`,
         style: proj ? {
-          background: proj.color + '22', color: proj.color,
+          background: proj.color + '22', color: 'var(--fg-1)',
           borderLeft: (isStart ? '2px solid ' + proj.color : '2px solid transparent'),
         } : {},
         onClick: (e) => { e.stopPropagation(); onOpenTask(t.id); },
@@ -275,7 +296,7 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         role: 'button',
         title: t.title + ' — drag onto a day to set its due date',
         style: proj ? {
-          background: proj.color + '18', color: proj.color,
+          background: proj.color + '18', color: 'var(--fg-1)',
           borderLeft: '2px solid ' + proj.color,
         } : {},
         onClick: (e) => { e.stopPropagation(); onOpenTask(t.id); },

@@ -239,7 +239,11 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
     pCard.appendChild(CardHeader('Active projects'));
     const pBody = h('div', { style: { padding: '0 16px 16px', display: 'grid', gap: '8px', gridTemplateColumns: 'repeat(2, 1fr)' } });
     if (!projects.length) {
-      pBody.appendChild(h('div', { class: 'empty', style: { gridColumn: '1 / -1', padding: '16px' } }, 'Create your first project in Admin settings.'));
+      // Don't send a non-admin to a surface they can't open — branch the copy.
+      const isAdmin = !!(window.state && window.state.me && window.state.me.is_admin);
+      pBody.appendChild(h('div', { class: 'empty', style: { gridColumn: '1 / -1', padding: '16px' } },
+        isAdmin ? 'Create your first project in Admin settings.'
+                : 'No projects yet — ask an admin to create one, then you can start adding tasks.'));
     }
     for (const p of projects) {
       const pTasks = tasks.filter(x => x.project == p.id);

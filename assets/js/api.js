@@ -13,13 +13,26 @@ const API = {
         : { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       ...opts,
     });
-    let body;
-    try { body = await res.json(); } catch { body = {}; }
+    let body, parseOk = true;
+    try { body = await res.json(); } catch { body = {}; parseOk = false; }
+    // Session expired mid-use → bounce to login (but only after the app has
+    // booted, so a boot-time 401 can't cause a redirect loop, and never while
+    // already on the login page). The initial auth check handles the not-yet-
+    // logged-in case separately.
+    if (res.status === 401 && window.__pmBooted && !/login\.html$/.test(location.pathname)) {
+      try { location.href = 'login.html'; } catch (_) {}
+    }
     if (!res.ok) {
       const err = new Error(body.error || `HTTP ${res.status}`);
       err.status = res.status;
       err.body = body;
       throw err;
+    }
+    // A 200 whose body didn't parse as JSON almost always means a PHP fatal
+    // emitted an HTML error page — surface it instead of returning {} (which
+    // silently produces a blank app when destructured downstream).
+    if (!parseOk) {
+      throw new Error('The server returned an unexpected (non-JSON) response.');
     }
     return body;
   },

@@ -107,9 +107,18 @@ function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder }) {
       // pointer-drag when the task is writable (undefined/true = the normal case).
       if (t.can_write === false) continue;
 
+      // Suppress the synthetic click that fires after a mouse drag so releasing a
+      // card over itself doesn't ALSO open the drawer (makeDraggable only
+      // prevents this for touch). Capture-phase runs before the card's onClick.
+      let dragged = false;
+      card.addEventListener('click', (e) => {
+        if (dragged) { e.stopImmediatePropagation(); e.preventDefault(); dragged = false; }
+      }, true);
+
       makeDraggable(card, {
         data: { id: t.id },
         onStart: (e) => {
+          dragged = true;
           dragCard = card;
           card.classList.add('dragging');
           // Floating clone so the card visibly moves with the finger/cursor.

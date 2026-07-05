@@ -68,6 +68,7 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
   const proj = projectById(task.project);
   const sub = task.subtasks || [];
   const done = task.status === 'done';
+  const canWrite = task.can_write !== false;
   let expanded = false;
 
   const wrap = h('div', { style: { borderBottom: isLast ? 'none' : '1px solid var(--line)' } });
@@ -79,7 +80,15 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
     wrap.replaceChildren();
     const head = h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '12px', padding: '12px 14px' } });
 
-    const cbWrap = h('div', { style: { paddingTop: '1px' }, onClick: onToggleStatus }, Checkbox(done, 18));
+    // Read-only viewers (a viewer assigned to a private-project task) can't
+    // toggle status — the server 403s — so render a non-interactive checkbox
+    // instead of a clickable one. Writable one is a keyboard-operable checkbox.
+    const cbWrap = canWrite
+      ? h('div', { style: { paddingTop: '1px', cursor: 'pointer' },
+          role: 'checkbox', 'aria-checked': done ? 'true' : 'false', tabindex: '0', 'aria-label': 'Mark task done',
+          onClick: onToggleStatus,
+          onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleStatus(e); } } }, Checkbox(done, 18))
+      : h('div', { style: { paddingTop: '1px', cursor: 'default' }, role: 'img', 'aria-label': done ? 'Done' : 'Not done' }, Checkbox(done, 18));
     head.appendChild(cbWrap);
 
     const body = h('div', { style: { flex: 1, minWidth: 0, cursor: 'pointer' }, onClick: onOpen });
@@ -123,18 +132,19 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
       const subWrap = h('div', { style: { padding: '2px 14px 12px 44px', display: 'grid', gap: '4px' } });
       for (const s of sub) {
         subWrap.appendChild(h('div', {
-          style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 8px', borderRadius: '6px', cursor: 'pointer' },
+          style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 8px', borderRadius: '6px', cursor: canWrite ? 'pointer' : 'default' },
           // Wait for the API round-trip before flipping local state so a
           // server-side failure doesn't desync the UI into a fake-success.
-          onClick: async () => {
+          // Read-only viewers can't toggle (server 403s) — no-op the click.
+          onClick: canWrite ? async () => {
             try {
               await onToggleSubtask(task.id, s.id, !s.done);
               s.done = !s.done;
               redraw();
             } catch (err) { toast(err.message || 'Subtask toggle failed', 'error'); }
-          },
-          onMouseenter: e => e.currentTarget.style.background = 'var(--bg-3)',
-          onMouseleave: e => e.currentTarget.style.background = 'transparent',
+          } : null,
+          onMouseenter: canWrite ? (e => e.currentTarget.style.background = 'var(--bg-3)') : null,
+          onMouseleave: canWrite ? (e => e.currentTarget.style.background = 'transparent') : null,
         },
           Checkbox(s.done, 14),
           h('span', {

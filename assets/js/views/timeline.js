@@ -218,7 +218,14 @@ function renderTimeline(tasks, handlers = {}) {
           if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onOpenTask?.(t.id); }
         });
 
-        // ---- horizontal drag to reschedule ----
+        // ---- horizontal drag to reschedule (writable tasks only) ----
+        // Read-only viewers (private-project viewer role) must not get a drag
+        // affordance — the server would 403 the reschedule. Show a default
+        // cursor and skip wiring the drag entirely, matching Kanban/Calendar.
+        const canWrite = t.can_write !== false;
+        if (!canWrite) {
+          bar.style.cursor = 'default';
+        } else {
         // Translate pixel delta -> whole-day delta using the grid's pixel width.
         // Delta is measured from where the pointer first went down so grabbing
         // the bar anywhere doesn't cause an initial jump.
@@ -266,6 +273,7 @@ function renderTimeline(tasks, handlers = {}) {
             }
           },
         });
+        } // end if (canWrite)
 
         grid.appendChild(bar);
         barEls.set(t.id, { bar, grid });
