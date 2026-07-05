@@ -1270,6 +1270,7 @@
         estimate: '',
         assignees: [],
         labels: [],
+        subtasks: '',        // textarea text, one checklist step per line
         cadence: 'weekly',
         interval_n: 1,
         weekday: '',
@@ -1383,6 +1384,7 @@
       model.recurringForm.estimate = r?.estimate ?? '';
       model.recurringForm.assignees = Array.isArray(r?.assignees) ? r.assignees.map(Number).filter(Boolean) : [];
       model.recurringForm.labels = Array.isArray(r?.labels) ? r.labels.map(Number).filter(Boolean) : [];
+      model.recurringForm.subtasks = Array.isArray(r?.subtasks) ? r.subtasks.join('\n') : '';
       model.recurringForm.cadence = r?.cadence ?? 'weekly';
       model.recurringForm.interval_n = Number(r?.interval_n ?? 1) || 1;
       model.recurringForm.weekday = r?.weekday == null ? '' : String(r.weekday);
@@ -1538,6 +1540,7 @@
         estimate: (f.estimate || '').trim() || null,
         assignees: Array.isArray(f.assignees) ? f.assignees.map(Number).filter(Boolean) : [],
         labels: Array.isArray(f.labels) ? f.labels.map(Number).filter(Boolean) : [],
+        subtasks: String(f.subtasks || '').split('\n').map(s => s.trim()).filter(Boolean),
         cadence: f.cadence,
         interval_n: Math.max(1, Number(f.interval_n) || 1),
         next_run: f.next_run,
@@ -1996,6 +1999,15 @@
         h('label', null, 'Description'),
         h('textarea', { value: model.recurringForm.description, onInput: e => { model.recurringForm.description = e.target.value; } }),
       ));
+      recurringForm.appendChild(h('div', { class: 'full' },
+        h('label', null, 'Subtask checklist (one step per line)'),
+        h('textarea', {
+          placeholder: 'Check net tension\nWipe down consoles\nRestock supplies',
+          value: model.recurringForm.subtasks,
+          onInput: e => { model.recurringForm.subtasks = e.target.value; },
+        }),
+        h('div', { class: 'hint' }, 'Each spawned task starts with these as unchecked subtasks.'),
+      ));
       recurringForm.appendChild(h('div', null,
         h('label', null, 'Priority'),
         h('select', { value: String(model.recurringForm.priority), onChange: e => { model.recurringForm.priority = Number(e.target.value); } },
@@ -2102,6 +2114,8 @@
               h('div', { class: 'row-meta' },
                 h('span', null, `${projectById(r.project_id)?.name || 'Unknown project'} • ${r.cadence} every ${r.interval_n}`),
                 h('span', null, `Next: ${r.next_run}`),
+                Array.isArray(r.subtasks) && r.subtasks.length
+                  ? h('span', null, `${r.subtasks.length} checklist step${r.subtasks.length === 1 ? '' : 's'}`) : null,
               ),
             ),
             h('div', { class: 'row-actions' },

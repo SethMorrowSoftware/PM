@@ -28,6 +28,7 @@ function pm_recurring_shape(array $r): array {
         'estimate'          => $r['estimate'],
         'assignees'         => pm_decode_id_list($r['assignees']),
         'labels'            => pm_decode_id_list($r['labels']),
+        'subtasks'          => pm_recurring_decode_subtasks($r['subtasks_json'] ?? null),
         'cadence'           => $r['cadence'],
         'interval_n'        => max(1, (int)$r['interval_n']),
         'weekday'           => $r['weekday']       === null ? null : (int)$r['weekday'],
@@ -51,6 +52,30 @@ function pm_encode_id_list($v): ?string {
     if (!is_array($v)) return null;
     $clean = array_values(array_unique(array_map('intval', $v)));
     return $clean ? json_encode($clean) : null;
+}
+
+// Checklist carried onto every spawned instance. Stored as a JSON array of
+// non-empty trimmed title strings (same format as task_templates.subtasks_json).
+function pm_recurring_decode_subtasks($raw): array {
+    if ($raw === null || $raw === '') return [];
+    $decoded = json_decode((string)$raw, true);
+    if (!is_array($decoded)) return [];
+    $out = [];
+    foreach ($decoded as $t) {
+        $t = trim((string)$t);
+        if ($t !== '') $out[] = mb_substr($t, 0, 500);
+    }
+    return $out;
+}
+
+function pm_recurring_encode_subtasks($v): ?string {
+    if (!is_array($v)) return null;
+    $clean = [];
+    foreach ($v as $t) {
+        $t = trim((string)$t);
+        if ($t !== '') $clean[] = mb_substr($t, 0, 500);
+    }
+    return $clean ? json_encode($clean, JSON_UNESCAPED_UNICODE) : null;
 }
 
 function pm_validate_cadence_fields(array &$r): void {
@@ -154,6 +179,11 @@ function pm_recurring_spawn_now(array $rule): ?int {
     foreach (pm_decode_id_list($rule['labels'] ?? null) as $lid) {
         pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$tid, (int)$lid]);
     }
+    // Materialize the rule's checklist as fresh (unchecked) subtasks.
+    $order = 0;
+    foreach (pm_recurring_decode_subtasks($rule['subtasks_json'] ?? null) as $stText) {
+        pm_exec('INSERT INTO subtasks (task_id, text, done, sort_order) VALUES (?,?,0,?)', [$tid, $stText, $order++]);
+    }
 
     $nextRun = pm_recurring_next_date($scheduleFor, $rule);
     $occLeft = $rule['occurrences_left'] === null ? null : max(0, (int)$rule['occurrences_left'] - 1);
@@ -233,6 +263,7 @@ function pm_recurring_save(array $input, ?int $existingId = null): int {
         'estimate'         => isset($input['estimate']) ? (string)$input['estimate'] : null,
         'assignees'        => pm_encode_id_list($input['assignees'] ?? []),
         'labels'           => pm_encode_id_list($input['labels'] ?? []),
+        'subtasks_json'    => pm_recurring_encode_subtasks($input['subtasks'] ?? []),
         'cadence'          => strtolower((string)($input['cadence'] ?? 'weekly')),
         'interval_n'       => (int)($input['interval_n'] ?? 1),
         'weekday'          => isset($input['weekday'])       && $input['weekday'] !== ''       ? (int)$input['weekday']       : null,
@@ -249,12 +280,12 @@ function pm_recurring_save(array $input, ?int $existingId = null): int {
         pm_exec(
             'UPDATE recurring_rules SET
                 project_id=?, title=?, description=?, priority=?, estimate=?,
-                assignees=?, labels=?, cadence=?, interval_n=?, weekday=?,
+                assignees=?, labels=?, subtasks_json=?, cadence=?, interval_n=?, weekday=?,
                 month_day=?, month_of_year=?, next_run=?, ends_on=?, occurrences_left=?, paused=?
              WHERE id=?',
             [
                 $shape['project_id'], $shape['title'], $shape['description'], $shape['priority'], $shape['estimate'],
-                $shape['assignees'], $shape['labels'], $shape['cadence'], $shape['interval_n'], $shape['weekday'],
+                $shape['assignees'], $shape['labels'], $shape['subtasks_json'], $shape['cadence'], $shape['interval_n'], $shape['weekday'],
                 $shape['month_day'], $shape['month_of_year'], $shape['next_run'], $shape['ends_on'],
                 $shape['occurrences_left'], $shape['paused'], $existingId
             ]
@@ -263,13 +294,13 @@ function pm_recurring_save(array $input, ?int $existingId = null): int {
     }
     pm_exec(
         'INSERT INTO recurring_rules
-            (project_id, title, description, priority, estimate, assignees, labels,
+            (project_id, title, description, priority, estimate, assignees, labels, subtasks_json,
              cadence, interval_n, weekday, month_day, month_of_year,
              next_run, ends_on, occurrences_left, paused, created_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
             $shape['project_id'], $shape['title'], $shape['description'], $shape['priority'], $shape['estimate'],
-            $shape['assignees'], $shape['labels'], $shape['cadence'], $shape['interval_n'], $shape['weekday'],
+            $shape['assignees'], $shape['labels'], $shape['subtasks_json'], $shape['cadence'], $shape['interval_n'], $shape['weekday'],
             $shape['month_day'], $shape['month_of_year'], $shape['next_run'], $shape['ends_on'],
             $shape['occurrences_left'], $shape['paused'], pm_current_user_id(),
         ]
