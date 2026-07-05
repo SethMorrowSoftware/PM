@@ -96,6 +96,15 @@
     const savedLabels = JSON.parse(localStorage.getItem('pm_labels') || '[]');
     if (Array.isArray(savedLabels)) state.filterLabels = savedLabels.map(Number).filter(Boolean);
   } catch { /* ignore unparsable history */ }
+  // Saved filters can outlive the rows they point at — a teammate removed in
+  // the Team panel, a deleted label, or ids that changed across an import. A
+  // dangling filter silently blanks every board while the sidebar counts
+  // (which ignore filters) still show open work, which reads as data loss.
+  // Validate what we restored against the freshly-loaded data and drop
+  // anything that no longer resolves.
+  if (state.filterProject != null && !state.projects.some(p => p.id == state.filterProject)) state.filterProject = null;
+  if (state.filterAssignee != null && !state.users.some(u => u.id == state.filterAssignee)) state.filterAssignee = null;
+  state.filterLabels = (state.filterLabels || []).filter(id => state.labels.some(l => l.id == id));
 
   function taskIdFromHash() {
     const m = (location.hash || '').match(/^#task=(\d+)$/);
@@ -705,6 +714,25 @@
     main.appendChild(content);
 
     const tasks = filteredTasks();
+
+    // If filters/search/hide-done are hiding literally everything on a board
+    // view while tasks exist, say so — otherwise an empty board reads as data
+    // loss. One click restores full visibility.
+    if (HIDE_DONE_VIEWS.includes(state.view) && tasks.length === 0 && state.tasks.length > 0) {
+      content.appendChild(h('div', { class: 'filter-blank-note' },
+        Icon('filter', 14),
+        h('span', null, 'Nothing here matches the current filters or search.'),
+        h('button', {
+          class: 'btn btn-ghost',
+          onClick: () => {
+            state.filterProject = null; state.filterAssignee = null; state.filterLabels = [];
+            state.search = ''; state.hideDone = false;
+            persist(); renderApp();
+          },
+        }, 'Show everything'),
+      ));
+    }
+
     const handlers = {
       onOpenTask: (id) => { state.openTaskId = id; setTaskHash(id); renderApp(); },
       onAddTask: (statusId, extras = {}) => {

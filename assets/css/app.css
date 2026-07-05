@@ -537,6 +537,15 @@ textarea:focus-visible,
 }
 .toast .toast-action:hover { background: var(--acc-border); color: var(--fg-0); }
 
+/* Banner shown when active filters hide every task on a board view */
+.filter-blank-note {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin: 14px 20px 0; padding: 10px 14px; border-radius: 10px;
+  background: var(--amber-soft); border: 1px solid rgba(245,158,11,0.35);
+  color: var(--amber-fg); font-size: 13px; flex-shrink: 0;
+}
+.filter-blank-note .icon { flex-shrink: 0; }
+
 /* Running-timer chip in the topbar */
 .timer-chip {
   display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px;
