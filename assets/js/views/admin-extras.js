@@ -1276,16 +1276,39 @@ window.renderAdminExtras = function () {
     redraw();
   }
 
-  function genPassword() {
-    // Readable-ish random initial password the admin can share; the user can
-    // change it later under Profile. Avoids ambiguous chars.
+  function randomPassword() {
+    // Readable-ish random password the admin can share; avoids ambiguous chars.
     const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
     let out = '';
     const buf = new Uint32Array(14);
     (window.crypto || {}).getRandomValues?.(buf);
     for (let i = 0; i < 14; i++) out += cs[(buf[i] || (i * 7 + 11)) % cs.length];
-    model.teamForm.password = out;
+    return out;
+  }
+
+  function genPassword() {
+    model.teamForm.password = randomPassword();
     redraw();
+  }
+
+  // Fail-safe reset: an admin sets a member's password directly (no current
+  // password needed — that's the point when someone is locked out). The
+  // dialog is pre-filled with a strong generated password the admin can
+  // accept as-is or type over; it's copied to the clipboard on success.
+  async function resetMemberPassword(u) {
+    const pw = await promptDialog({
+      title: `Reset password — ${u.name}`,
+      label: 'New password (they can change it later under Profile)',
+      value: randomPassword(),
+    });
+    if (pw == null || pw === '') return;
+    if (pw.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+    try {
+      await API.updateUser(u.id, { password: pw });
+      let copied = false;
+      try { await navigator.clipboard.writeText(pw); copied = true; } catch (_) { /* http or denied */ }
+      toast(`Password updated for ${u.name}${copied ? ' — copied to clipboard' : ''}`, 'success', { ms: 6000 });
+    } catch (e) { toast(e.message || 'Password reset failed', 'error'); }
   }
 
   async function saveTeamMember() {
@@ -1416,6 +1439,8 @@ window.renderAdminExtras = function () {
         ),
         h('div', { class: 'row-actions' },
           h('button', { class: 'btn btn-ghost', onClick: () => { resetTeamForm(u); redraw(); } }, 'Edit'),
+          h('button', { class: 'btn btn-ghost', title: 'Set a new password for this member (fail-safe reset)',
+            onClick: () => resetMemberPassword(u) }, 'Reset password'),
           h('button', { class: 'btn btn-ghost', onClick: () => toggleAdmin(u) }, u.is_admin ? 'Remove admin' : 'Make admin'),
           u.id === meId ? null : h('button', { class: 'btn btn-ghost', onClick: () => deleteMember(u) }, 'Remove'),
         ),
