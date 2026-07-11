@@ -69,7 +69,11 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
   const sub = task.subtasks || [];
   const done = task.status === 'done';
   const canWrite = task.can_write !== false;
-  let expanded = false;
+  // Persist subtask expansion in view-local UI state (per CLAUDE.md) so it
+  // survives the coarse renderApp() re-render — toggling a task's status or the
+  // 60s poll rebuilds this view, and a closure flag would collapse every row.
+  const exState = (window.state.ui.checklist.expanded ||= {});
+  const isExpanded = () => !!exState[task.id];
 
   const wrap = h('div', { style: { borderBottom: isLast ? 'none' : '1px solid var(--line)' } });
 
@@ -114,10 +118,10 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
     }, Icon('message', 11), String(task.comments)));
     if (sub.length > 0) {
       metaRow.appendChild(h('button', {
-        onClick: (e) => { e.stopPropagation(); expanded = !expanded; redraw(); },
+        onClick: (e) => { e.stopPropagation(); exState[task.id] = !isExpanded(); redraw(); },
         style: { display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--fg-2)', fontSize: '11.5px' },
       },
-        h('span', { style: { display: 'inline-flex', transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' } }, Icon('chevronRight', 11)),
+        h('span', { style: { display: 'inline-flex', transform: isExpanded() ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' } }, Icon('chevronRight', 11)),
         Icon('checkSquare', 11),
         ` ${subDone}/${sub.length} subtasks`));
     }
@@ -128,7 +132,7 @@ function ChecklistItem(task, { isLast, onOpen, onToggleStatus, onToggleSubtask }
     head.appendChild(AvatarStack(task.assignees, 3, 22));
     wrap.appendChild(head);
 
-    if (expanded && sub.length > 0) {
+    if (isExpanded() && sub.length > 0) {
       const subWrap = h('div', { style: { padding: '2px 14px 12px 44px', display: 'grid', gap: '4px' } });
       for (const s of sub) {
         subWrap.appendChild(h('div', {

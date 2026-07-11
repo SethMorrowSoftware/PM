@@ -220,6 +220,11 @@
     // Also skip while an open popover/picker or the notification dropdown is on
     // screen — a full renderApp() would detach its anchor and mis-position it.
     if (document.querySelector('.popover') || state.notifOpen) return;
+    // The Activity and Goals views hold paging/scroll position and (Goals) an
+    // in-progress create form in view-local state that a full renderApp() would
+    // reset — skip the tick on them; the bell catches up on the next poll once
+    // the user navigates to another view.
+    if (state.view === 'activity' || state.view === 'goals') return;
     loadNotifications();
   }, 60000);
 
@@ -705,6 +710,17 @@
     );
   }
 
+  // The mobile bottom-nav is only mounted by renderApp() when no overlay is open.
+  // Hand-built overlays (quick-add / profile / settings) tear themselves down by
+  // removing their own nodes (not a full renderApp) to preserve input focus — so
+  // after such a close the nav can be missing on phones until the next render.
+  // Re-mount it here if nothing else is open, mirroring renderApp()'s condition.
+  function remountMobileNav() {
+    if (state.openTaskId || state.quickAddOpen || state.settingsOpen ||
+        state.profileOpen || state.shortcutsOpen || state.mobileSidebarOpen) return;
+    if (!rootEl.querySelector('.mobile-bottom-nav')) rootEl.appendChild(renderMobileNav());
+  }
+
   // ----- main area -----
   function renderMain() {
     const main = h('main', { class: 'main' });
@@ -900,13 +916,13 @@
     bell.addEventListener('click', () => openNotifications(bell));
     bar.appendChild(bell);
 
-    bar.appendChild(h('button', { class: 'btn btn-primary',
+    bar.appendChild(h('button', { class: 'btn btn-primary topbar-action', title: 'New task', 'aria-label': 'New task',
       onClick: () => { state.quickAddStatus = 'todo'; state.quickAddDefaults = null; state.quickAddOpen = true; renderApp(); } },
-      Icon('plus', 14), ' New task'));
+      Icon('plus', 14), h('span', { class: 'btn-label' }, 'New task')));
     bar.appendChild(h('button', {
-      class: 'btn btn-muted',
+      class: 'btn btn-muted topbar-action', title: 'Settings', 'aria-label': 'Settings',
       onClick: () => { state.settingsOpen = true; renderApp(); },
-    }, Icon('settings', 14), ' Settings'));
+    }, Icon('settings', 14), h('span', { class: 'btn-label' }, 'Settings')));
     return bar;
   }
 
@@ -964,7 +980,7 @@
 
       // Project filter
       const projName = state.filterProject ? projectById(state.filterProject)?.name : 'All projects';
-      const projBtn = h('button', { class: 'filter-pill' }, Icon('folder', 12), ' ' + projName + ' ', Icon('chevronDown', 11));
+      const projBtn = h('button', { class: 'filter-pill' + (state.filterProject ? ' active' : '') }, Icon('folder', 12), ' ' + projName + ' ', Icon('chevronDown', 11));
       projBtn.addEventListener('click', () => {
         openPopover(projBtn, ({close}) => {
           const wrap = h('div');
@@ -982,7 +998,7 @@
 
       // Assignee filter
       const asgLabel = state.filterAssignee ? (userById(state.filterAssignee)?.name || 'Someone') : 'Anyone';
-      const asgBtn = h('button', { class: 'filter-pill' }, Icon('user', 12), ' ' + asgLabel + ' ', Icon('chevronDown', 11));
+      const asgBtn = h('button', { class: 'filter-pill' + (state.filterAssignee ? ' active' : '') }, Icon('user', 12), ' ' + asgLabel + ' ', Icon('chevronDown', 11));
       asgBtn.addEventListener('click', () => {
         openPopover(asgBtn, ({close}) => assigneePickerContent(
           state.filterAssignee ? [state.filterAssignee] : [],
@@ -994,7 +1010,7 @@
 
       // Labels
       const lblLabel = state.filterLabels.length ? `${state.filterLabels.length} label${state.filterLabels.length > 1 ? 's' : ''}` : 'Labels';
-      const lblBtn = h('button', { class: 'filter-pill' }, Icon('tag', 12), ' ' + lblLabel + ' ', Icon('chevronDown', 11));
+      const lblBtn = h('button', { class: 'filter-pill' + (state.filterLabels.length ? ' active' : '') }, Icon('tag', 12), ' ' + lblLabel + ' ', Icon('chevronDown', 11));
       lblBtn.addEventListener('click', () => {
         openPopover(lblBtn, ({close}) => labelPickerContent(
           state.filterLabels,
@@ -1090,6 +1106,7 @@
       state.quickAddOpen = false;
       state.quickAddDefaults = null;
       scrim.remove(); modal.remove();
+      remountMobileNav();
     }
     let submitting = false;
     async function submit() {
@@ -1251,6 +1268,7 @@
     function close() {
       state.profileOpen = false;
       scrim.remove(); modal.remove();
+      remountMobileNav();
     }
 
     async function submit() {
@@ -1473,6 +1491,7 @@
       if (settingsNavObserver) { settingsNavObserver.disconnect(); settingsNavObserver = null; }
       scrim.remove();
       modal.remove();
+      remountMobileNav();
     }
 
     // Build the left-rail section navigation from the sections actually present

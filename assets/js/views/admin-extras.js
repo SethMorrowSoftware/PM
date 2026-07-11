@@ -1559,8 +1559,9 @@ window.renderAdminExtras = function () {
           h('button', { class: 'btn btn-ghost', onClick: async () => {
             const ok = await confirmDialog({
               title: 'Delete intake form?',
-              body: `"${it.name}" — its public link stops working immediately. Tasks it already created are kept.`,
+              message: `"${it.name}" — its public link stops working immediately. Tasks it already created are kept.`,
               confirmText: 'Delete form',
+              danger: true,
             });
             if (!ok) return;
             try { await API.deleteIntakeForm(it.id); toast('Intake form deleted', 'success'); await refreshIntake(); }

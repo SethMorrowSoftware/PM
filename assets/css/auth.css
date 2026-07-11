@@ -37,6 +37,6 @@ body.auth-body {
 .auth-foot a:hover { text-decoration: underline; }
 
 .auth-err {
-  background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
-  color: #FCA5A5; padding: 9px 11px; border-radius: 7px; font-size: 12.5px; margin-bottom: 12px;
+  background: var(--red-soft); border: 1px solid rgba(239,68,68,0.3);
+  color: var(--red-fg); padding: 9px 11px; border-radius: 7px; font-size: 12.5px; margin-bottom: 12px;
 }

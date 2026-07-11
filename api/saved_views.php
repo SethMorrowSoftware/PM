@@ -29,7 +29,7 @@ function pm_saved_view_payload(array $body): array {
     $name = trim((string)($body['name'] ?? ''));
     if ($name === '') pm_error('Name is required');
     $view = trim((string)($body['view_key'] ?? 'list'));
-    if (!in_array($view, ['dashboard','kanban','list','checklist','calendar'], true)) $view = 'list';
+    if (!in_array($view, ['dashboard','kanban','list','checklist','calendar','timeline','workload','activity','goals'], true)) $view = 'list';
     $f = $body['filters'] ?? [];
     if (!is_array($f)) $f = [];
     $filters = [

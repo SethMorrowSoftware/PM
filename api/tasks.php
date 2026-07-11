@@ -731,6 +731,17 @@ function pm_notify_unblocked(int $completedTaskId, ?int $actorId): void {
     foreach ($deps as $d) {
         $depTaskId = (int)$d['task_id'];
         if ($depTaskId <= 0) continue;
+        // Only announce "no longer blocked" once EVERY blocker is done — a task
+        // blocked by two tasks would otherwise fire this when just the first one
+        // completes, while it's still genuinely blocked by the second.
+        $remaining = pm_fetch_one(
+            "SELECT COUNT(*) AS n
+             FROM task_dependencies dd
+             JOIN tasks bt ON bt.id = dd.depends_on_id
+             WHERE dd.task_id = ? AND bt.status <> 'done'",
+            [$depTaskId]
+        );
+        if ((int)($remaining['n'] ?? 0) > 0) continue;
         $dep = pm_fetch_one('SELECT ref, title FROM tasks WHERE id = ?', [$depTaskId]);
         if (!$dep) continue;
         $body = ($dep['ref'] ?? ('#' . $depTaskId)) . ' ' . ($dep['title'] ?? '') . ' is no longer blocked';
@@ -1017,8 +1028,13 @@ function pm_add_comment(int $taskId): void {
     if (mb_strlen($body) > 5000) pm_error('Comment is too long (max 5000 characters)');
     pm_exec('INSERT INTO comments (task_id, user_id, body) VALUES (?,?,?)',
         [$taskId, pm_current_user_id(), $body]);
-    pm_log_activity(pm_current_user_id(), $taskId, 'commented', mb_substr($body, 0, 200));
+    // Capture the new comment id BEFORE logging activity — pm_log_activity does
+    // its own INSERT, which advances the connection's lastInsertId(). On any
+    // install where activity rows outnumber comments (i.e. every real one after
+    // normal use), reading pm_last_id() after it would return the activity row
+    // id and the comment fetch below would find nothing → 500.
     $cid = pm_last_id();
+    pm_log_activity(pm_current_user_id(), $taskId, 'commented', mb_substr($body, 0, 200));
     $cols = pm_comments_have_updated_at()
         ? 'c.id, c.body, c.created_at, c.updated_at, c.user_id, u.name, u.initials, u.color'
         : 'c.id, c.body, c.created_at, NULL AS updated_at, c.user_id, u.name, u.initials, u.color';

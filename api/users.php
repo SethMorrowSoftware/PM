@@ -30,7 +30,13 @@ if ($method === 'PATCH' && $id !== null) {
     pm_require_admin();
     $body = pm_body();
     $f=[]; $p=[];
-    if (isset($body['role']))    { $f[]='role = ?';    $p[]=(string)$body['role']; }
+    if (isset($body['role'])) {
+        $role = (string)$body['role'];
+        // Bound to the column width (VARCHAR(80)) so an over-long role returns a
+        // clean 400 instead of a bubbled PDOException/500, matching auth.php.
+        if (mb_strlen($role) > 80) pm_error('Role is too long');
+        $f[]='role = ?'; $p[]=$role;
+    }
     if (isset($body['name'])) {
         $name = trim((string)$body['name']);
         if ($name === '') pm_error('Name cannot be empty');

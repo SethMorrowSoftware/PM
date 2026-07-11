@@ -1,5 +1,9 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+// Per-project access helpers (pm_readable_project_ids); guarded so the endpoint
+// still works — failing open — if the file is absent, mirroring the other
+// task-scoped endpoints.
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 pm_boot();
 
 $method = pm_method();
@@ -79,13 +83,24 @@ function pm_goal_owner_map(array $ownerIds): array {
 
 // Fetch linked project ids for a set of goal ids in one query. Returns a map
 // of goal_id => [project_id, ...].
-function pm_goal_project_map(array $goalIds): array {
+// $readableIds restricts the linked projects surfaced to a non-admin who can't
+// read a private project a goal spans: null = no restriction (admin / no private
+// projects); [] = the caller can read no projects at all.
+function pm_goal_project_map(array $goalIds, ?array $readableIds = null): array {
     $goalIds = array_values(array_unique(array_map('intval', $goalIds)));
     if (!$goalIds) return [];
+    if ($readableIds !== null && !$readableIds) return [];
     $ph = implode(',', array_fill(0, count($goalIds), '?'));
+    $params = $goalIds;
+    $projClause = '';
+    if ($readableIds !== null) {
+        $pph = implode(',', array_fill(0, count($readableIds), '?'));
+        $projClause = " AND project_id IN ($pph)";
+        foreach ($readableIds as $r) $params[] = (int)$r;
+    }
     $rows = pm_fetch_all(
-        "SELECT goal_id, project_id FROM goal_projects WHERE goal_id IN ($ph) ORDER BY project_id",
-        $goalIds
+        "SELECT goal_id, project_id FROM goal_projects WHERE goal_id IN ($ph)$projClause ORDER BY project_id",
+        $params
     );
     $map = [];
     foreach ($rows as $r) {
@@ -97,19 +112,27 @@ function pm_goal_project_map(array $goalIds): array {
 // Fetch task totals/done counts across each goal's linked projects in one
 // grouped query (goal_projects -> tasks). Returns goal_id => ['total','done'].
 // Avoids N+1 by aggregating server-side and folding into PHP.
-function pm_goal_count_map(array $goalIds): array {
+function pm_goal_count_map(array $goalIds, ?array $readableIds = null): array {
     $goalIds = array_values(array_unique(array_map('intval', $goalIds)));
     if (!$goalIds) return [];
+    if ($readableIds !== null && !$readableIds) return [];
     $ph = implode(',', array_fill(0, count($goalIds), '?'));
+    $params = $goalIds;
+    $projClause = '';
+    if ($readableIds !== null) {
+        $pph = implode(',', array_fill(0, count($readableIds), '?'));
+        $projClause = " AND gp.project_id IN ($pph)";
+        foreach ($readableIds as $r) $params[] = (int)$r;
+    }
     $rows = pm_fetch_all(
         "SELECT gp.goal_id,
                 COUNT(t.id) AS task_total,
                 SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS task_done
          FROM goal_projects gp
          LEFT JOIN tasks t ON t.project_id = gp.project_id
-         WHERE gp.goal_id IN ($ph)
+         WHERE gp.goal_id IN ($ph)$projClause
          GROUP BY gp.goal_id",
-        $goalIds
+        $params
     );
     $map = [];
     foreach ($rows as $r) {
@@ -122,15 +145,15 @@ function pm_goal_count_map(array $goalIds): array {
 }
 
 // Load one goal fully shaped (project_ids + counts + owner), or null.
-function pm_goal_get(int $id): ?array {
+function pm_goal_get(int $id, ?array $readableIds = null): ?array {
     $row = pm_fetch_one(
         'SELECT id, name, description, due, status, progress_mode, manual_pct, owner_id, sort_order
          FROM goals WHERE id = ?',
         [$id]
     );
     if (!$row) return null;
-    $projectIds = pm_goal_project_map([$id])[$id] ?? [];
-    $counts     = pm_goal_count_map([$id])[$id] ?? ['total' => 0, 'done' => 0];
+    $projectIds = pm_goal_project_map([$id], $readableIds)[$id] ?? [];
+    $counts     = pm_goal_count_map([$id], $readableIds)[$id] ?? ['total' => 0, 'done' => 0];
     $ownerMap   = $row['owner_id'] !== null ? pm_goal_owner_map([(int)$row['owner_id']]) : [];
     $owner      = $row['owner_id'] !== null ? ($ownerMap[(int)$row['owner_id']] ?? null) : null;
     return pm_goal_shape($row, $projectIds, $counts, $owner);
@@ -152,14 +175,19 @@ function pm_goal_validate_projects($raw): array {
 }
 
 if ($method === 'GET' && $id === null) {
-    pm_require_auth();
+    $uid = pm_require_auth();
+    // Don't leak a private project's task aggregates / linkage to a non-member:
+    // filter both the linked project_ids and the task counts to readable projects
+    // (null = admin or no private projects -> unrestricted, fail-open if the
+    // access lib is absent — mirrors milestones.php / labels.php).
+    $readable = function_exists('pm_readable_project_ids') ? pm_readable_project_ids($uid) : null;
     $goals = pm_fetch_all(
         'SELECT id, name, description, due, status, progress_mode, manual_pct, owner_id, sort_order
          FROM goals ORDER BY sort_order, id'
     );
     $goalIds  = array_map(fn($g) => (int)$g['id'], $goals);
-    $projects = pm_goal_project_map($goalIds);
-    $counts   = pm_goal_count_map($goalIds);
+    $projects = pm_goal_project_map($goalIds, $readable);
+    $counts   = pm_goal_count_map($goalIds, $readable);
     $owners   = pm_goal_owner_map(array_map(fn($g) => $g['owner_id'], $goals));
     $out = [];
     foreach ($goals as $g) {
@@ -176,8 +204,9 @@ if ($method === 'GET' && $id === null) {
 }
 
 if ($method === 'GET' && $id !== null) {
-    pm_require_auth();
-    $out = pm_goal_get($id);
+    $uid = pm_require_auth();
+    $readable = function_exists('pm_readable_project_ids') ? pm_readable_project_ids($uid) : null;
+    $out = pm_goal_get($id, $readable);
     if (!$out) pm_error('Not found', 404);
     pm_json(['goal' => $out]);
 }
