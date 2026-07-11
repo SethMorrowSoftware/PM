@@ -26,6 +26,14 @@ function h(tag, props, ...children) {
     }
   }
   appendChildren(el, children);
+  // A <select>'s `value` only "sticks" once its <option>s exist, but props are
+  // applied above BEFORE children are appended — so h('select', {value}, ...opts)
+  // would otherwise ignore `value` and default to the first option. Re-assert it
+  // here so edit/prefill dropdowns (project visibility, label scope, goal owner,
+  // email-notif preference, …) reflect the real current value.
+  if (props && 'value' in props && props.value != null && el.tagName === 'SELECT') {
+    el.value = props.value;
+  }
   return el;
 }
 function appendChildren(el, children) {

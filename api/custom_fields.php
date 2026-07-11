@@ -180,11 +180,18 @@ if ($method === 'PUT') {
     $fieldId = pm_int_param('field_id');
     if (!$taskId || !$fieldId) pm_error('task_id and field_id required');
 
-    $field = pm_fetch_one('SELECT id, field_type, options_json FROM custom_fields WHERE id = ?', [$fieldId]);
+    $field = pm_fetch_one('SELECT id, field_type, options_json, project_id FROM custom_fields WHERE id = ?', [$fieldId]);
     if (!$field) pm_error('Field not found', 404);
-    $task = pm_fetch_one('SELECT id FROM tasks WHERE id = ?', [$taskId]);
+    $task = pm_fetch_one('SELECT id, project_id FROM tasks WHERE id = ?', [$taskId]);
     if (!$task) pm_error('Task not found', 404);
     if (function_exists('pm_can_write_task') && !pm_can_write_task($uid, $taskId)) pm_error('Forbidden', 403);
+    // A project-scoped field can only carry values on tasks in that project;
+    // global fields (project_id NULL) apply everywhere. Without this a writer on
+    // a task in project B could store a value keyed to project A's field, which
+    // the list loader would then surface as a stray value.
+    if ($field['project_id'] !== null && (int)$field['project_id'] !== (int)$task['project_id']) {
+        pm_error("Field does not apply to this task's project", 422);
+    }
 
     $value = pm_param('value', null);
     if (is_array($value)) $value = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

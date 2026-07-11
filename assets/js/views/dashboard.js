@@ -381,19 +381,23 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
     // Greeting (always on). The "Customize" toggle lives in this header.
     root.appendChild(buildGreeting());
 
-    // Stat cards (always on).
-    root.appendChild(StatCard('Open tasks',      total - completed.length,
-      openTrend.dir === 'flat' ? 'no change wk/wk' : `${fmtDelta(openNetThis - openNetLast)} net wk/wk`,
-      openTrend, 'blue', 'checkSquare'));
-    root.appendChild(StatCard('Due today',       dueToday.length,
-      overdue.length > 0 ? `${overdue.length} overdue` : 'on track',
-      null, 'amber', 'clock'));
-    root.appendChild(StatCard('In progress',     inProgress.length,
-      `${new Set(inProgress.flatMap(x => x.assignees)).size} people active`,
-      null, 'violet', 'activity'));
-    root.appendChild(StatCard('Completed (7d)',  completedThis,
-      completedTrend.dir === 'flat' ? `${completionPct}% done overall` : `${fmtDelta(completedTrend.delta)} vs last week`,
-      completedTrend, 'green', 'trendUp'));
+    // Stat cards (always on). Wrapped in a dedicated container with its own
+    // responsive grid (4-up on desktop, 2×2 on phones) so the labels/values
+    // stay legible on narrow screens instead of getting crushed 4-across.
+    root.appendChild(h('div', { class: 'dash-stats' },
+      StatCard('Open tasks',      total - completed.length,
+        openTrend.dir === 'flat' ? 'no change wk/wk' : `${fmtDelta(openNetThis - openNetLast)} net wk/wk`,
+        openTrend, 'blue', 'checkSquare'),
+      StatCard('Due today',       dueToday.length,
+        overdue.length > 0 ? `${overdue.length} overdue` : 'on track',
+        null, 'amber', 'clock'),
+      StatCard('In progress',     inProgress.length,
+        `${new Set(inProgress.flatMap(x => x.assignees)).size} people active`,
+        null, 'violet', 'activity'),
+      StatCard('Completed (7d)',  completedThis,
+        completedTrend.dir === 'flat' ? `${completionPct}% done overall` : `${fmtDelta(completedTrend.delta)} vs last week`,
+        completedTrend, 'green', 'trendUp'),
+    ));
 
     const customizing = !!ds.customizing;
 
@@ -420,7 +424,7 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
 
   // ---- greeting --------------------------------------------------------------
   function buildGreeting() {
-    return h('div', { style: { gridColumn: 'span 12', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '20px' } },
+    return h('div', { class: 'dash-greeting', style: { gridColumn: 'span 12', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '20px' } },
       h('div', null,
         h('div', { style: { fontSize: '12px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '6px' } },
           t.toLocaleDateString('en', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })),
@@ -648,7 +652,7 @@ function StatCard(label, value, delta, trend, tone, icon) {
     : (trend.good ? '#86EFAC' : '#FCA5A5');
   return h('div', {
     style: {
-      gridColumn: 'span 3', background: 'var(--bg-2)', border: '1px solid var(--line)',
+      background: 'var(--bg-2)', border: '1px solid var(--line)',
       borderRadius: '12px', padding: '16px', position: 'relative', overflow: 'hidden'
     }
   },

@@ -906,6 +906,17 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
 .dash-grid > .col-8  { grid-column: span 8; }
 .dash-grid > .col-12 { grid-column: span 12; }
 
+/* KPI stat cards: full-width row that lays its own 4 cards out responsively so
+   they never crush 4-across on a phone (the main grid collapses to 1 column on
+   mobile, which the cards' own grid ignores). */
+.dash-grid > .dash-stats {
+  grid-column: 1 / -1;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-5);
+}
+@media (max-width: 640px) {
+  .dash-grid > .dash-stats { grid-template-columns: repeat(2, 1fr); gap: var(--sp-3); }
+}
+
 /* ---------- Compact density modifier ---------- */
 .app.density-compact .nav-item { padding: 5px 10px; }
 .app.density-compact .nav-proj { padding: 4px 10px; }
@@ -951,22 +962,31 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   .mobile-nav-scrim { display: none; }
 }
 
-/* ---------- MOBILE REFLOW: dashboard grid ---------- */
+/* ---------- MOBILE REFLOW: dashboard grid ----------
+   The dashboard widgets set their column span via an INLINE grid-column (e.g.
+   Card({gridColumn:'span 7'})), which a class-based selector can never override.
+   So the reflow forces the span with !important: a clean 2-up on tablets and a
+   single column on phones, with the greeting + KPI row always full width. */
 @media (max-width: 980px) {
   .dash-grid {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(2, 1fr) !important;
     gap: var(--sp-3); padding: var(--sp-4);
   }
-  .dash-grid > .col-3 { grid-column: span 3; }
-  .dash-grid > .col-4 { grid-column: span 3; }
+  .dash-grid > * { grid-column: span 1 !important; }
+  .dash-grid > .dash-greeting,
+  .dash-grid > .dash-stats { grid-column: 1 / -1 !important; }
+}
+
+@media (max-width: 720px) {
+  .dash-grid {
+    grid-template-columns: 1fr !important;
+    gap: var(--sp-3); padding: var(--sp-3);
+  }
+  .dash-grid > * { grid-column: 1 / -1 !important; }
 }
 
 /* ---------- MOBILE REFLOW: list view -> stacked cards ---------- */
 @media (max-width: 720px) {
-  .dash-grid {
-    grid-template-columns: 1fr;
-    gap: var(--sp-3); padding: var(--sp-3);
-  }
   .dash-grid > [class*="col-"] { grid-column: 1 / -1; }
 
   /* Hide the column-headers entirely; rows become self-describing cards. */
@@ -1116,4 +1136,55 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   .icon-btn.sm { min-width: 32px; min-height: 32px; }
   .chip, .reaction, .cal-event, .dp-day, .mbn-item { min-height: 32px; }
   .pop-item { min-height: 40px; }
+}
+
+/* ============================================================
+   UI POLISH — refinements toward Monday/Asana-grade fit & finish.
+   Grouped here so the base component rules above stay untouched.
+   ============================================================ */
+
+/* Modals (quick-add, profile): cap height and scroll the body so the
+   footer's primary action is always reachable on short/landscape
+   viewports. Header + footer stay pinned; only the body scrolls. */
+.modal { display: flex; flex-direction: column; max-height: 78vh; max-height: 78dvh; }
+.modal > .modal-head, .modal > .modal-foot { flex-shrink: 0; }
+.modal > .modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+/* Applied-filter cue: a set project/assignee/label filter now reads as
+   active at a glance (a category table-stake in Monday/Asana/Linear),
+   not only via its changed text. */
+.filter-pill.active {
+  background: var(--acc-soft); color: var(--acc-1);
+  border-color: var(--acc-border); border-style: solid;
+}
+.filter-pill.active .icon { color: var(--acc-1); }
+
+/* Collapsible list-group headers are clickable — give them the same
+   hover feedback as rows/nav items so they don't read as inert. */
+.list-group-head:hover { background: var(--bg-2); }
+
+/* Text selection was a ~10%-alpha wash (barely visible); make it legible
+   in both themes. */
+::selection { background: var(--acc-border); color: var(--fg-0); }
+
+/* Firefox scrollbar theming to match the tuned WebKit scrollbars above. */
+* { scrollbar-width: thin; scrollbar-color: var(--bg-4) transparent; }
+
+/* Topbar primary actions collapse to icon-only on phones so the bar never
+   overflows horizontally. The labels survive as title + aria-label, and
+   both actions are also reachable in the mobile bottom-nav. */
+@media (max-width: 640px) {
+  .topbar-action .btn-label { display: none; }
+  .topbar-action { padding: 6px 9px; }
+  .search { min-width: 120px; }
+}
+
+/* Toasts sit above the fixed mobile bottom-nav (so an Undo action and the
+   nav taps never overlap) and span the width on phones. */
+@media (max-width: 980px) {
+  .toast-host {
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    left: 12px; right: 12px;
+  }
+  .toast { max-width: none; }
 }
