@@ -161,7 +161,11 @@ function renderActivity(tasks, handlers = {}) {
     }
     for (const a of run.items) list.appendChild(ActivityRow(a, onOpenTask));
     if (run.loading) {
-      list.appendChild(h('div', { class: 'empty', style: { padding: '14px' } }, 'Loading…'));
+      // First page → skeleton rows; subsequent pages already show rows above, so
+      // keep a lighter inline hint for the append.
+      list.appendChild(run.items.length
+        ? h('div', { class: 'empty', style: { padding: '14px' } }, 'Loading…')
+        : SkeletonRows(6, { style: { padding: '4px 0' } }));
     }
   }
 

@@ -976,6 +976,26 @@ window.emojiReactionBar = emojiReactionBar;
 window.ThemeToggle = ThemeToggle;
 window.miniTaskChip = miniTaskChip;
 
+// -------- Loading skeletons --------
+// Prefer these over a bare "Loading…" string for a more finished feel.
+// Skeleton({w, h, class, style}) → one shimmer block. w/h accept a number (px)
+// or any CSS length string.
+function Skeleton({ w, h: height, class: cls = '', style = {} } = {}) {
+  const s = { ...style };
+  if (w != null) s.width = typeof w === 'number' ? w + 'px' : w;
+  if (height != null) s.height = typeof height === 'number' ? height + 'px' : height;
+  return h('div', { class: ('skeleton ' + cls).trim(), style: s, 'aria-hidden': 'true' });
+}
+// SkeletonRows(n, {style, rowClass}) → a labelled block of N shimmer rows for a
+// list/table/feed loading state (announced once to assistive tech).
+function SkeletonRows(n = 5, { style = {}, rowClass = 'skeleton-row' } = {}) {
+  const wrap = h('div', { class: 'skeleton-rows', role: 'status', 'aria-label': 'Loading', style });
+  for (let i = 0; i < n; i++) wrap.appendChild(h('div', { class: 'skeleton ' + rowClass, 'aria-hidden': 'true' }));
+  return wrap;
+}
+window.Skeleton = Skeleton;
+window.SkeletonRows = SkeletonRows;
+
 // -------- Minimal, SAFE Markdown renderer --------
 // Security model: ALL input HTML is escaped FIRST, then a fixed, small set of
 // formatting tags is introduced (strong/em/code/a/p/ul/li/br). Links are only

@@ -106,8 +106,8 @@ function fe($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/css/app.css?v=33">
-<link rel="stylesheet" href="assets/css/auth.css?v=33">
+<link rel="stylesheet" href="assets/css/app.css?v=34">
+<link rel="stylesheet" href="assets/css/auth.css?v=34">
 <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 <script>try{var t=localStorage.getItem('pm_theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}</script>
 <style>
