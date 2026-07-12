@@ -153,7 +153,12 @@ function StatusPill(statusId) {
     style: {
       display: 'inline-flex', alignItems: 'center', gap: '6px',
       padding: '2px 8px', borderRadius: '5px', fontSize: '11.5px', fontWeight: '500',
-      background: s.color + '22', color: s.color, border: `1px solid ${s.color}33`,
+      // Blend the status hue toward the theme foreground so the label keeps
+      // enough contrast on the soft tint in BOTH themes (the raw mid-tone
+      // status colors fail WCAG as text on the light-theme white surface).
+      // Falls back to the inherited (legible) text color if color-mix is
+      // unsupported. The dot below stays the pure status color.
+      background: s.color + '22', color: `color-mix(in srgb, ${s.color}, var(--fg-0) 42%)`, border: `1px solid ${s.color}33`,
     },
   },
     h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: s.color } }),
@@ -306,6 +311,13 @@ function assigneePickerContent(selectedIds, onToggle, close) {
 
 function labelPickerContent(selectedIds, onToggle, close, { keepOpen = false, scopeProjectId = null, onCreateLabel = null } = {}) {
   const wrap = h('div');
+  // Track selection in a local Set so the checkmarks update live on every toggle
+  // when keepOpen re-renders. Every caller REPLACES its source array on toggle
+  // (state.filterLabels = [...set], saveTask({labels:[...next]}), Object.assign,
+  // form.labels = [...set]) rather than mutating the array we were handed here,
+  // so reading the original `selectedIds` reference would freeze the checks at
+  // open-time. We flip optimistically; a reopen re-syncs from the source of truth.
+  const selected = new Set((selectedIds || []).map(Number));
   const input = h('input', { placeholder: 'Find labels...', autofocus: true });
   wrap.appendChild(h('div', { class: 'pop-search' }, input));
   wrap.appendChild(h('div', { class: 'popover-header' }, 'Labels'));
@@ -328,8 +340,13 @@ function labelPickerContent(selectedIds, onToggle, close, { keepOpen = false, sc
     const labels = S().labels.filter(l => !l.archived && inScope(l) && l.name.toLowerCase().includes(q));
     for (const l of labels) {
       list.appendChild(PopoverItem({
-        selected: selectedIds.includes(l.id),
-        onSelect: () => { onToggle(l.id); if (!keepOpen) close(); else render(input.value); },
+        selected: selected.has(Number(l.id)),
+        onSelect: () => {
+          const idn = Number(l.id);
+          if (selected.has(idn)) selected.delete(idn); else selected.add(idn);
+          onToggle(l.id);
+          if (!keepOpen) close(); else render(input.value);
+        },
         leading: Tag(l.id),
       }));
     }

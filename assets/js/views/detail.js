@@ -23,7 +23,11 @@ function pmDrawerCache(taskId) {
   });
 }
 
-function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubtask, onDeleteSubtask, onDeleteTask }) {
+function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtask, onAddSubtask, onDeleteSubtask, onDeleteTask }) {
+  // Clear the cache marker on close so reopening the SAME task refetches fresh
+  // data. pmDrawerCache() only invalidates when a DIFFERENT task opens, so
+  // without this a close→reopen of one task showed stale comments/time/activity.
+  const onClose = () => { window._pmDrawerOpenFor = null; if (typeof _rawOnClose === 'function') _rawOnClose(); };
   const cache = pmDrawerCache(task.id);
 
   const scrim = h('div', { class: 'scrim light', onClick: onClose });
@@ -188,7 +192,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
     // Head
     const head = h('div', { class: 'drawer-head' });
     head.appendChild(h('span', { class: 'mono', style: { fontSize: '11.5px', color: 'var(--fg-3)' } }, task.ref));
-    if (proj) head.appendChild(h('span', { style: { display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: proj.color } },
+    if (proj) head.appendChild(h('span', { style: { display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11.5px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)` } },
       h('span', { style: { width: '8px', height: '8px', borderRadius: '2px', background: proj.color } }),
       proj.name));
     if (!canWrite) head.appendChild(h('span', {
@@ -1111,7 +1115,7 @@ function renderTaskDetail(task, { onClose, onUpdate, onToggleSubtask, onAddSubta
           Avatar(c.user, 28),
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { fontSize: '12.5px', color: 'var(--fg-1)', display: 'flex', alignItems: 'center', gap: '6px' } },
-              h('span', { style: { fontWeight: 600 } }, c.user.name),
+              h('span', { style: { fontWeight: 600 } }, c.user?.name || 'Former teammate'),
               h('span', { style: { color: 'var(--fg-3)', fontSize: '11.5px' } }, relTime(c.created_at)),
               c.updated_at ? h('span', { style: { color: 'var(--fg-4)', fontSize: '10.5px' } }, '(edited)') : null,
               canModerate ? h('button', { class: 'btn btn-ghost', style: { marginLeft: 'auto', fontSize: '11px', padding: '2px 6px' }, onClick: async () => {

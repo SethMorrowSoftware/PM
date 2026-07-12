@@ -257,7 +257,7 @@ function KanbanCard(task, { onOpen, onStatus }) {
   card.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' } },
     h('span', { class: 'mono', style: { fontSize: '10.5px', color: 'var(--fg-3)' } }, task.ref),
     h('span', { style: { width: '3px', height: '3px', borderRadius: '50%', background: 'var(--fg-4)' } }),
-    proj ? h('span', { style: { fontSize: '11px', color: proj.color, fontWeight: '500' } }, proj.name) : null,
+    proj ? h('span', { style: { fontSize: '11px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)`, fontWeight: '500' } }, proj.name) : null,
     h('div', { style: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '4px' } },
       PriorityFlag(task.priority),
       statusBtn,

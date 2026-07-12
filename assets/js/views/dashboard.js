@@ -293,7 +293,7 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' } },
           Icon('target', 13),
           h('span', { style: { fontSize: '12.5px', fontWeight: '600', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.name),
-          proj ? h('span', { style: { fontSize: '10.5px', color: proj.color } }, proj.name) : null,
+          proj ? h('span', { style: { fontSize: '10.5px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)` } }, proj.name) : null,
           m.due ? DueDate(m.due, true) : null,
         ),
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
@@ -323,7 +323,7 @@ function renderDashboard(tasks, { onOpenTask, onNavigate, activity }) {
         Avatar(a.user, 24),
         h('div', { style: { flex: 1, minWidth: 0 } },
           h('div', { style: { fontSize: '12.5px', color: 'var(--fg-1)', lineHeight: '1.35' } },
-            h('span', { style: { fontWeight: '600' } }, a.user.name),
+            h('span', { style: { fontWeight: '600' } }, a.user?.name || 'Someone'),
             ' ',
             h('span', { style: { color: 'var(--fg-3)' } }, a.action),
             ' ',
@@ -640,20 +640,23 @@ function LegendDot(color, label) {
 // direction — so e.g. "fewer net-new open tasks" reads green even though it's a
 // down arrow. `flat` and `null` stay neutral.
 function StatCard(label, value, delta, trend, tone, icon) {
+  // Icon tint uses theme-aware *-fg tokens (dark pastel in dark, saturated-dark
+  // in light) so the glyph stays legible on the soft tile in BOTH themes — the
+  // old hardcoded pastels (#60A5FA/#FCD34D/…) washed out on the white card.
   const tones = {
-    blue:   { bg: 'rgba(59,130,246,0.08)', border: 'rgba(59,130,246,0.2)', fg: '#60A5FA' },
-    amber:  { bg: 'rgba(245,158,11,0.08)', border: 'rgba(245,158,11,0.2)', fg: '#FCD34D' },
-    violet: { bg: 'rgba(168,85,247,0.08)', border: 'rgba(168,85,247,0.2)', fg: '#D8B4FE' },
-    green:  { bg: 'rgba(34,197,94,0.08)',  border: 'rgba(34,197,94,0.2)',  fg: '#86EFAC' },
+    blue:   { bg: 'var(--acc-soft)',    border: 'var(--acc-border)',  fg: 'var(--acc-1)' },
+    amber:  { bg: 'var(--amber-soft)',  border: 'rgba(245,158,11,0.2)', fg: 'var(--amber-fg)' },
+    violet: { bg: 'var(--violet-soft)', border: 'rgba(168,85,247,0.2)', fg: 'var(--violet-fg)' },
+    green:  { bg: 'var(--green-soft)',  border: 'rgba(34,197,94,0.2)',  fg: 'var(--green-fg)' },
   }[tone];
   const dir = trend && trend.dir;
   const deltaColor = !trend || dir === 'flat'
     ? 'var(--fg-3)'
-    : (trend.good ? '#86EFAC' : '#FCA5A5');
+    : (trend.good ? 'var(--green-fg)' : 'var(--red-fg)');
   return h('div', {
     style: {
       background: 'var(--bg-2)', border: '1px solid var(--line)',
-      borderRadius: '12px', padding: '16px', position: 'relative', overflow: 'hidden'
+      borderRadius: 'var(--radius-lg)', padding: '16px', position: 'relative', overflow: 'hidden'
     }
   },
     h('div', {
@@ -786,7 +789,7 @@ function FocusRow(task, onClick) {
   body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
     h('span', { class: 'mono', style: { fontSize: '10.5px', color: 'var(--fg-3)' } }, task.ref),
     h('span', { style: { width: '4px', height: '4px', borderRadius: '50%', background: 'var(--fg-4)' } }),
-    proj ? h('span', { style: { fontSize: '11px', color: proj.color } }, proj.name) : null,
+    proj ? h('span', { style: { fontSize: '11px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)` } }, proj.name) : null,
   ));
   body.appendChild(h('div', {
     style: { fontSize: '13.5px', fontWeight: '500', marginTop: '2px',

@@ -11,6 +11,9 @@
 
 require_once __DIR__ . '/bootstrap.php';
 if (is_file(__DIR__ . '/mail_lib.php')) require_once __DIR__ . '/mail_lib.php'; // pm_app_url
+// Per-project access so the feed can't leak a private project's tasks to an
+// owner who was removed from its membership but left as an assignee.
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 
 // ---------- public feed (no session; the token IS the auth) ----------------
 $feedToken = isset($_GET['t']) ? (string)$_GET['t'] : '';
@@ -24,15 +27,30 @@ if ($feedToken !== '') {
     $user = pm_fetch_one('SELECT id, name FROM users WHERE ics_token = ?', [$feedToken]);
     if (!$user) { http_response_code(404); exit('Not found'); }
 
-    $rows = pm_fetch_all(
-        "SELECT t.id, t.ref, t.title, t.due, t.start_date, t.status, t.priority, p.name AS project
-           FROM tasks t
-           JOIN task_assignees ta ON ta.task_id = t.id
-           LEFT JOIN projects p ON p.id = t.project_id
-          WHERE ta.user_id = ? AND t.status <> 'done' AND t.due IS NOT NULL
-          ORDER BY t.due LIMIT 500",
-        [(int)$user['id']]
-    );
+    // Restrict to projects the owner can currently read. null = no restriction
+    // (admin, or no private projects); an empty list = nothing readable.
+    $readable = function_exists('pm_readable_project_ids')
+        ? pm_readable_project_ids((int)$user['id']) : null;
+    if ($readable !== null && !$readable) {
+        $rows = [];
+    } else {
+        $extra = '';
+        $params = [(int)$user['id']];
+        if ($readable !== null) {
+            $ph = implode(',', array_fill(0, count($readable), '?'));
+            $extra = " AND t.project_id IN ($ph)";
+            foreach ($readable as $pid) $params[] = (int)$pid;
+        }
+        $rows = pm_fetch_all(
+            "SELECT t.id, t.ref, t.title, t.due, t.start_date, t.status, t.priority, p.name AS project
+               FROM tasks t
+               JOIN task_assignees ta ON ta.task_id = t.id
+               LEFT JOIN projects p ON p.id = t.project_id
+              WHERE ta.user_id = ? AND t.status <> 'done' AND t.due IS NOT NULL$extra
+              ORDER BY t.due LIMIT 500",
+            $params
+        );
+    }
 
     $esc = function ($s) {
         $s = (string)$s;

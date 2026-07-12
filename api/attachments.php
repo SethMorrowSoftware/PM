@@ -62,9 +62,15 @@ function pm_upload_attachment(int $taskId): void {
     if (!is_uploaded_file($tmp)) pm_error('Invalid upload', 400);
 
     $dir = pm_ensure_attachments_dir();
+    // Keep the real extension only to reconcile the sniffed MIME below — do NOT
+    // persist it in the on-disk name. Storing e.g. "shell.php"/"x.svg" would make
+    // the storage/.htaccess deny rule the *only* thing preventing direct execution
+    // or inline rendering; a deploy that doesn't honor .htaccess (nginx, wrong
+    // AllowOverride) would then serve an attacker-named file. A fixed ".bin"
+    // extension removes that dependency. The original name is preserved in
+    // `original_name` for the download Content-Disposition, so nothing is lost.
     $ext = pm_attachment_safe_ext($orig);
-    $stored = bin2hex(random_bytes(16));
-    if ($ext !== '') $stored .= '.' . $ext;
+    $stored = bin2hex(random_bytes(16)) . '.bin';
     $dest = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $stored;
 
     if (!move_uploaded_file($tmp, $dest)) {

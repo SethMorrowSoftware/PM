@@ -9,3 +9,16 @@
     Order Allow,Deny
     Deny from all
 </IfModule>
+
+# Defense-in-depth: even if the deny rule above is ever bypassed (misconfig, a
+# relocated attachments dir, etc.), make sure nothing in here is ever executed
+# as a script. Attachments are also stored with a neutral ".bin" name now, so
+# an FPM/CGI handler keyed on ".php" won't pick them up regardless.
+# NOTE: no "php_flag engine off" here on purpose — php_flag is a mod_php-only
+# directive and 500s on the PHP-FPM/CGI setups common on cPanel. The handler
+# removal below is the portable equivalent and mod_mime is always present.
+<IfModule mod_mime.c>
+    RemoveHandler .php .phtml .phar .php3 .php4 .php5 .php7 .pht .cgi .pl .py
+    RemoveType .php .phtml .phar .php3 .php4 .php5 .php7 .pht
+    AddType text/plain .php .phtml .phar .html .htm .svg
+</IfModule>
