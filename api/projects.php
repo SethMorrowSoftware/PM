@@ -2,6 +2,8 @@
 require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/slack_client.php';
 if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
+// For unlinking attachment files when a project (and its tasks) is force-deleted.
+if (is_file(__DIR__ . '/attachments_lib.php')) require_once __DIR__ . '/attachments_lib.php';
 pm_boot();
 pm_require_auth();
 
@@ -199,7 +201,24 @@ if ($method === 'DELETE' && $id !== null) {
             'rule_count'  => $ruleCount,
         ], 409);
     }
+    // Collect attachment files BEFORE the delete — the FK cascade
+    // (project → tasks → task_attachments) removes the rows, so we'd otherwise
+    // lose the on-disk filenames and orphan every file forever. pm_delete_task
+    // does the same for a single task; this mirrors it for a whole project.
+    $attachedFiles = [];
+    if (function_exists('pm_attachment_delete_file')) {
+        try {
+            foreach (pm_fetch_all(
+                'SELECT ta.stored_name FROM task_attachments ta
+                 JOIN tasks t ON t.id = ta.task_id WHERE t.project_id = ?', [$id]) as $a) {
+                $sn = (string)($a['stored_name'] ?? '');
+                if ($sn !== '') $attachedFiles[] = $sn;
+            }
+        } catch (Throwable $_) { /* best effort — proceed with the delete */ }
+    }
     pm_exec('DELETE FROM projects WHERE id = ?', [$id]);
+    // Unlink the physical files only after the DB delete succeeded.
+    foreach ($attachedFiles as $sn) pm_attachment_delete_file($sn);
     pm_log_activity_maybe(pm_current_user_id(), null, 'project_deleted', $row['name']);
     pm_json(['ok' => true]);
 }

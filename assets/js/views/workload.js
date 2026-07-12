@@ -110,8 +110,8 @@ function renderWorkload(tasks, handlers) {
     ),
     h('div', { class: 'hstack', style: { gap: '10px', flexWrap: 'wrap' } },
       SummaryStat('Open', totalOpen, 'checkSquare', 'var(--acc-1)'),
-      SummaryStat('Overdue', totalOverdue, 'alert', totalOverdue > 0 ? '#FCA5A5' : 'var(--fg-3)'),
-      SummaryStat('Unassigned', totalUnassigned, 'user', totalUnassigned > 0 ? '#FCD34D' : 'var(--fg-3)'),
+      SummaryStat('Overdue', totalOverdue, 'alert', totalOverdue > 0 ? 'var(--red-fg)' : 'var(--fg-3)'),
+      SummaryStat('Unassigned', totalUnassigned, 'user', totalUnassigned > 0 ? 'var(--amber-fg)' : 'var(--fg-3)'),
     ),
   ));
 
@@ -207,8 +207,8 @@ function WorkloadCard(row, maxOpen, onNavigate, parseEstimate) {
   // Metric chips: in progress / overdue / due this week.
   body.appendChild(h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
     MetricChip('In progress', m.inProgress.length, '#F59E0B'),
-    MetricChip('Overdue', m.overdue.length, m.overdue.length > 0 ? '#FCA5A5' : 'var(--fg-3)'),
-    MetricChip('Due this week', m.dueWeek.length, m.dueWeek.length > 0 ? '#FCD34D' : 'var(--fg-3)'),
+    MetricChip('Overdue', m.overdue.length, m.overdue.length > 0 ? 'var(--red-fg)' : 'var(--fg-3)'),
+    MetricChip('Due this week', m.dueWeek.length, m.dueWeek.length > 0 ? 'var(--amber-fg)' : 'var(--fg-3)'),
   ));
 
   // Stacked status-breakdown bar (mirrors dashboard's bar pattern). Omitted when
@@ -247,7 +247,7 @@ function WorkloadCard(row, maxOpen, onNavigate, parseEstimate) {
   if (m.estTotal > 0) {
     const pct = Math.round((m.logged / m.estTotal) * 100);
     const over = m.logged > m.estTotal;
-    timeRow.appendChild(h('span', { class: 'mono', style: { fontSize: '12px', color: over ? '#FCA5A5' : 'var(--fg-1)' } },
+    timeRow.appendChild(h('span', { class: 'mono', style: { fontSize: '12px', color: over ? 'var(--red-fg)' : 'var(--fg-1)' } },
       `${fmtMinutes(m.logged)} / ${fmtMinutes(m.estTotal)} (${pct}%)`));
   } else {
     timeRow.appendChild(h('span', { class: 'mono', style: { fontSize: '12px', color: 'var(--fg-1)' } }, fmtMinutes(m.logged)));
@@ -263,7 +263,7 @@ function WorkloadCard(row, maxOpen, onNavigate, parseEstimate) {
     body.appendChild(h('div', { style: { height: '6px', background: 'var(--bg-3)', borderRadius: '3px', overflow: 'hidden' } },
       h('div', { style: {
         width: (ratio * 100) + '%', height: '100%',
-        background: over ? '#FCA5A5' : 'var(--acc-1)',
+        background: over ? 'var(--red)' : 'var(--acc-1)',
         borderRadius: '3px', transition: 'width 0.5s',
       } })));
   }

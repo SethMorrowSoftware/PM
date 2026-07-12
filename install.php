@@ -111,7 +111,13 @@ function pm_install_schema(): void {
             initials VARCHAR(4) NOT NULL,
             color VARCHAR(16) NOT NULL DEFAULT '#3B82F6',
             is_admin TINYINT(1) NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            email_notifs VARCHAR(16) NOT NULL DEFAULT 'all',
+            last_digest DATE NULL,
+            ics_token VARCHAR(64) NULL,
+            timer_task_id INT NULL,
+            timer_started_at DATETIME NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_users_ics (ics_token)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
         "CREATE TABLE IF NOT EXISTS projects (
@@ -196,6 +202,7 @@ function pm_install_schema(): void {
             user_id INT NULL,
             body TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NULL,
             INDEX idx_cmt_task (task_id),
             CONSTRAINT fk_cmt_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
             CONSTRAINT fk_cmt_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL

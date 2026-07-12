@@ -968,8 +968,9 @@
       tabs.appendChild(h('button', {
         class: 'view-tab' + (state.view === k ? ' active' : ''),
         // title keeps the label available on hover / to screen readers when the
-        // text collapses to an icon-only tab on narrower screens.
-        title: l, 'aria-label': l,
+        // text collapses to an icon-only tab on narrower screens. aria-current
+        // conveys the active view to assistive tech (background alone doesn't).
+        title: l, 'aria-label': l, 'aria-current': state.view === k ? 'page' : null,
         onClick: () => { state.view = k; persist(); renderApp(); },
       }, Icon(ic, 13), h('span', { class: 'view-tab-label' }, l)));
     }

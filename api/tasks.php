@@ -578,9 +578,33 @@ function pm_update_task(int $id): void {
         if ($p < 0 || $p > 3) pm_error('Invalid priority');
     }
 
+    // Status is handled separately from the generic column list below so the
+    // *transition into done* can be made atomic (exactly-once side effects). Two
+    // concurrent PATCHes marking the same task done both read prevStatus='todo'
+    // and, with an unconditional write, both fire the done side-effects — which
+    // double-spawns the next recurring instance, double-notifies, and double-runs
+    // automations. The conditional UPDATE below lets exactly one request win.
+    $didComplete   = false;   // did THIS request move the task into 'done'?
+    $statusChanged = false;
+    $newStatus     = null;
+    if (array_key_exists('status', $body)) {
+        $newStatus = (string)$body['status'];
+        if ($newStatus !== $prevStatus) {
+            $statusChanged = true;
+            if ($newStatus === 'done') {
+                // Only one racer can flip a not-done row to done; the loser
+                // matches zero rows (status already 'done') and skips the effects.
+                $n = pm_exec("UPDATE tasks SET status = 'done' WHERE id = ? AND status <> 'done'", [$id]);
+                $didComplete = ($n >= 1);
+            } else {
+                pm_exec('UPDATE tasks SET status = ? WHERE id = ?', [$newStatus, $id]);
+            }
+        }
+    }
+
     $fields = [];
     $params = [];
-    foreach (['title','description','status','estimate','due','start_date'] as $col) {
+    foreach (['title','description','estimate','due','start_date'] as $col) {
         if (array_key_exists($col, $body)) {
             $fields[] = "$col = ?";
             $params[] = $body[$col] === '' ? null : $body[$col];
@@ -617,21 +641,41 @@ function pm_update_task(int $id): void {
         pm_exec('UPDATE tasks SET ' . implode(', ', $fields) . ' WHERE id = ?', $params);
     }
 
+    // Validate FIRST (these pm_error/exit on bad input) — must happen before any
+    // transaction is opened. Then replace labels/assignees inside ONE transaction
+    // so a failure mid-way can't leave the task with everything wiped (the
+    // replace is a DELETE-then-reINSERT and was previously unguarded).
+    $validLabels = null;
     if (array_key_exists('labels', $body) && is_array($body['labels'])) {
         $labelProject = array_key_exists('project', $body) ? (int)$body['project'] : (int)$t['project_id'];
         $validLabels = pm_validate_label_ids_for_project($body['labels'], $labelProject);
-        pm_exec('DELETE FROM task_labels WHERE task_id = ?', [$id]);
-        foreach ($validLabels as $lid) {
-            pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$id, (int)$lid]);
-        }
     }
-    $newlyAssigned = [];
+    $validAssignees = null;
     if (array_key_exists('assignees', $body) && is_array($body['assignees'])) {
         $validAssignees = pm_validate_assignee_ids($body['assignees']);
-        pm_exec('DELETE FROM task_assignees WHERE task_id = ?', [$id]);
-        foreach ($validAssignees as $uid) {
-            pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$id, $uid]);
-            if (!in_array($uid, $prevAssignees, true)) $newlyAssigned[] = $uid;
+    }
+    $newlyAssigned = [];
+    if ($validLabels !== null || $validAssignees !== null) {
+        try {
+            pm_db()->beginTransaction();
+            if ($validLabels !== null) {
+                pm_exec('DELETE FROM task_labels WHERE task_id = ?', [$id]);
+                foreach ($validLabels as $lid) {
+                    pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$id, (int)$lid]);
+                }
+            }
+            if ($validAssignees !== null) {
+                pm_exec('DELETE FROM task_assignees WHERE task_id = ?', [$id]);
+                foreach ($validAssignees as $uid) {
+                    pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$id, (int)$uid]);
+                    if (!in_array((int)$uid, $prevAssignees, true)) $newlyAssigned[] = (int)$uid;
+                }
+            }
+            pm_db()->commit();
+        } catch (Throwable $e) {
+            if (pm_db()->inTransaction()) pm_db()->rollBack();
+            error_log('pm_update_task labels/assignees replace failed: ' . $e->getMessage());
+            pm_error('Failed to update task labels/assignees.', 500);
         }
     }
 
@@ -658,13 +702,25 @@ function pm_update_task(int $id): void {
                     [$id, $newProjectId]
                 );
             }
+            // Drop values for project-scoped custom fields that don't belong to
+            // the new project. custom_fields.php refuses to SET such a value, so
+            // leaving stale ones here makes the API return values for fields that
+            // don't apply to the task's current project. Global fields are kept.
+            try {
+                pm_exec(
+                    'DELETE tcv FROM task_custom_values tcv JOIN custom_fields cf ON cf.id = tcv.field_id
+                     WHERE tcv.task_id = ? AND cf.project_id IS NOT NULL AND cf.project_id <> ?',
+                    [$id, $newProjectId]
+                );
+            } catch (Throwable $_) { /* custom-fields tables optional on old installs */ }
         }
     }
 
-    // Activity (light)
-    if (isset($body['status']) && $body['status'] !== $t['status']) {
-        pm_log_activity(pm_current_user_id(), $id, 'moved', $t['status'] . ' → ' . $body['status']);
-        if ($body['status'] === 'done') {
+    // Activity (light). Log the move per request, but only the winner of the
+    // atomic done-transition records 'completed' (and fires the effects below).
+    if ($statusChanged) {
+        pm_log_activity(pm_current_user_id(), $id, 'moved', $prevStatus . ' → ' . $newStatus);
+        if ($didComplete) {
             pm_log_activity(pm_current_user_id(), $id, 'completed', $t['title']);
         }
     }
@@ -672,10 +728,11 @@ function pm_update_task(int $id): void {
     $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$id]);
 
     // Fire Slack + recurring-generation side effects once the write is stable.
-    // Must be a *transition into* done — otherwise re-saving an already-done
-    // task would fire another Slack message and spawn another recurring
-    // instance on every save.
-    if ($prevStatus !== 'done' && $t['status'] === 'done') {
+    // Gated on THIS request having caused the done-transition (see the atomic
+    // conditional UPDATE above) so re-saving an already-done task — or a losing
+    // concurrent racer — never re-pings Slack or spawns a duplicate recurring
+    // instance.
+    if ($didComplete) {
         $proj = pm_fetch_one('SELECT * FROM projects WHERE id = ?', [(int)$t['project_id']]);
         pm_slack_notify_task_event($t, $proj, 'task_completed', 'marked this task done');
         if (!empty($t['recurring_rule_id'])) {
@@ -706,7 +763,7 @@ function pm_update_task(int $id): void {
     }
     // Real transition into done: ping recipients, and surface to watchers of any
     // task this one was blocking (it's now potentially unblocked).
-    if ($prevStatus !== 'done' && $t['status'] === 'done') {
+    if ($didComplete) {
         try {
             $doneBody = pm_actor_name($actor) . ' completed ' . $t['ref'] . ' ' . $t['title'];
             pm_notify_users(pm_task_recipients($id, $actor), $actor, $id, 'status', $doneBody);
@@ -715,7 +772,7 @@ function pm_update_task(int $id): void {
     }
 
     try {
-        if (function_exists('pm_run_automations') && $prevStatus !== 'done' && $t['status'] === 'done') {
+        if (function_exists('pm_run_automations') && $didComplete) {
             pm_run_automations('task_completed', $id, $actor);
             $t = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$id]) ?: $t;
         }
@@ -1257,6 +1314,13 @@ function pm_bulk_update_tasks(): void {
                         [$id, $newProjectId]
                     );
                 }
+                try {
+                    pm_exec(
+                        'DELETE tcv FROM task_custom_values tcv JOIN custom_fields cf ON cf.id = tcv.field_id
+                         WHERE tcv.task_id = ? AND cf.project_id IS NOT NULL AND cf.project_id <> ?',
+                        [$id, $newProjectId]
+                    );
+                } catch (Throwable $_) { /* optional tables on old installs */ }
             }
         }
         $updated++;

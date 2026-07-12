@@ -92,12 +92,22 @@ function renderList(tasks, handlers) {
     groups = groups.filter(g => g.tasks.length);
 
     if (!groups.length) {
-      root.appendChild(h('div', {
-        class: 'empty empty-cta',
-        style: { marginTop: '10px', padding: '28px 22px', border: '1px dashed var(--line-2)', borderRadius: '10px' },
-      },
-      h('div', { style: { fontWeight: '600', marginBottom: '4px' } }, 'No matching tasks'),
-      h('div', { style: { color: 'var(--fg-2)' } }, 'Try clearing filters or create a new task.')));
+      const st = window.state;
+      const filtersActive = !!(st.filterProject || st.filterAssignee ||
+        (st.filterLabels && st.filterLabels.length) || (st.search && st.search.trim()));
+      // Match the polished .empty-cta pattern (icon tile + h3 + p + CTA) used by
+      // the timeline/other views instead of the old bare dashed box.
+      root.appendChild(h('div', { class: 'empty-cta', style: { marginTop: '10px' } },
+        h('div', { class: 'empty-icon' }, Icon(filtersActive ? 'filter' : 'checkSquare', 26)),
+        h('h3', null, filtersActive ? 'No matching tasks' : 'No tasks yet'),
+        h('p', null, filtersActive
+          ? 'Nothing matches the current filters. Try clearing them, or add a new task.'
+          : 'Create your first task to get it onto the board.'),
+        (handlers && typeof handlers.onAddTask === 'function')
+          ? h('button', { class: 'btn btn-primary', style: { marginTop: '4px' },
+              onClick: () => handlers.onAddTask('todo') }, Icon('plus', 14), 'New task')
+          : null,
+      ));
       return;
     }
 
