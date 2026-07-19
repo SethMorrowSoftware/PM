@@ -118,8 +118,8 @@ function renderWorkload(tasks, handlers) {
   // Loading state: state.tasks not yet hydrated. (tasks is the filtered slice;
   // when the app is still loading there are simply no users and no tasks.)
   if (!window.state.users || window.state.users.length === 0) {
-    root.appendChild(h('div', { class: 'card' },
-      h('div', { class: 'empty', style: { padding: '48px 20px' } }, 'Loading team…')));
+    root.appendChild(h('div', { class: 'card', style: { padding: '16px' } },
+      SkeletonRows(5, { rowClass: 'skeleton-row' })));
     return root;
   }
 

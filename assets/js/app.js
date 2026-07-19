@@ -2,7 +2,17 @@
 
 (async function main() {
   const rootEl = document.getElementById('root');
-  mount(rootEl, h('div', { class: 'empty', style: { padding: '80px 20px' } }, 'Loading…'));
+  // Boot skeleton (shimmer placeholders) instead of a bare "Loading…" — reads as
+  // finished product rather than prototype while the bootstrap fetch resolves.
+  mount(rootEl, h('div', { style: { padding: '72px 24px', maxWidth: '860px', margin: '0 auto' }, role: 'status', 'aria-label': 'Loading' },
+    Skeleton({ w: '38%', h: 24, class: 'skeleton-line', style: { marginBottom: '24px' } }),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '20px' } },
+      Skeleton({ class: 'skeleton-card' }), Skeleton({ class: 'skeleton-card' }),
+      Skeleton({ class: 'skeleton-card' }), Skeleton({ class: 'skeleton-card' })),
+    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' } },
+      Skeleton({ class: 'skeleton-card', style: { height: '220px' } }),
+      Skeleton({ class: 'skeleton-card', style: { height: '220px' } })),
+  ));
 
   // Ensure session.
   try {

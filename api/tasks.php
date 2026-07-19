@@ -1602,12 +1602,21 @@ function pm_recurring_next_date(string $fromYmd, array $rule): string {
             $ts = strtotime("+{$interval} day", $ts);
             break;
         case 'weekly':
-            $ts = strtotime("+{$interval} week", $ts);
+            // "Every N weeks on <weekday>". When the base is already on the target
+            // weekday, advance a full N-week interval. When it's misaligned (a
+            // manually-set next_run whose weekday differs), snap forward to the
+            // NEXT target weekday only — the old code jumped N weeks AND then
+            // snapped, overshooting the first occurrence by up to 6 days. Kept in
+            // sync with the identical copy in api/recurring.php.
             if (array_key_exists('weekday', $rule) && $rule['weekday'] !== null) {
                 $target = (int)$rule['weekday'];
                 $cur = (int)date('w', $ts);
                 $delta = ($target - $cur + 7) % 7;
-                if ($delta) $ts = strtotime("+{$delta} day", $ts);
+                $ts = $delta === 0
+                    ? strtotime("+{$interval} week", $ts)
+                    : strtotime("+{$delta} day", $ts);
+            } else {
+                $ts = strtotime("+{$interval} week", $ts);
             }
             break;
         case 'monthly': {

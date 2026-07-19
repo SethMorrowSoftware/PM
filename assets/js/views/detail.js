@@ -24,10 +24,28 @@ function pmDrawerCache(taskId) {
 }
 
 function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtask, onAddSubtask, onDeleteSubtask, onDeleteTask }) {
-  // Clear the cache marker on close so reopening the SAME task refetches fresh
-  // data. pmDrawerCache() only invalidates when a DIFFERENT task opens, so
-  // without this a close→reopen of one task showed stale comments/time/activity.
-  const onClose = () => { window._pmDrawerOpenFor = null; if (typeof _rawOnClose === 'function') _rawOnClose(); };
+  // In-progress composer drafts (comment / time-log / reminder) persist in
+  // window.state.ui.drawer — NOT closure locals — so the coarse renderApp()
+  // that many in-drawer actions trigger (log time, start timer, change a field)
+  // doesn't rebuild this closure and wipe half-typed text. Keyed by task id so a
+  // draft never leaks to a different task; reset on close. (CLAUDE.md convention:
+  // view-local UI state lives in window.state.ui.<view>.)
+  const S = window.state;
+  S.ui.drawer = S.ui.drawer || { taskId: null };
+  if (S.ui.drawer.taskId !== task.id) {
+    S.ui.drawer = { taskId: task.id, comment: '', logMinutes: '', logNote: '', reminderAt: '', reminderEveryone: false };
+  }
+  const drawerUi = S.ui.drawer;
+
+  // Clear the cache marker AND drafts on close so reopening the SAME task
+  // refetches fresh data and starts with an empty composer. pmDrawerCache()
+  // only invalidates when a DIFFERENT task opens, so without this a close→reopen
+  // of one task showed stale comments/time/activity.
+  const onClose = () => {
+    window._pmDrawerOpenFor = null;
+    S.ui.drawer = { taskId: null };
+    if (typeof _rawOnClose === 'function') _rawOnClose();
+  };
   const cache = pmDrawerCache(task.id);
 
   const scrim = h('div', { class: 'scrim light', onClick: onClose });
@@ -45,12 +63,12 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
   let descEditing = false;
   let tempTitle = task.title;
   let newSubtaskText = '';
-  let newCommentText = '';
+  let newCommentText = drawerUi.comment || '';
   let newBlockerQuery = '';
-  let logMinutes = '';
-  let logNote = '';
-  let newReminderAt = '';
-  let newReminderEveryone = false;
+  let logMinutes = drawerUi.logMinutes || '';
+  let logNote = drawerUi.logNote || '';
+  let newReminderAt = drawerUi.reminderAt || '';
+  let newReminderEveryone = !!drawerUi.reminderEveryone;
   let comments = cache.comments;
   let activity = cache.activity;
   let deps = cache.deps;
@@ -712,19 +730,19 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
         const minInput = h('input', {
           type: 'number', min: '1', placeholder: 'min', value: logMinutes,
           style: { width: '70px', background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-          onInput: e => { logMinutes = e.target.value; },
+          onInput: e => { logMinutes = e.target.value; drawerUi.logMinutes = e.target.value; },
         });
         const noteInput = h('input', {
           type: 'text', placeholder: 'Note (optional)', value: logNote,
           style: { flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-          onInput: e => { logNote = e.target.value; },
+          onInput: e => { logNote = e.target.value; drawerUi.logNote = e.target.value; },
         });
         const submitTime = async () => {
           const mins = parseInt(logMinutes, 10);
           if (!mins || mins <= 0) { toast('Enter minutes greater than 0', 'error'); return; }
           try {
             await API.addTime(task.id, { minutes: mins, note: logNote.trim() || undefined });
-            logMinutes = ''; logNote = '';
+            logMinutes = ''; logNote = ''; drawerUi.logMinutes = ''; drawerUi.logNote = '';
             await loadTime();
             refreshBoard();
           } catch (e) { toast(e.message, 'error'); }
@@ -821,7 +839,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
         const whenInput = h('input', {
           type: 'datetime-local', value: newReminderAt,
           style: { background: 'var(--bg-3)', border: '1px solid var(--line-2)', borderRadius: '6px', padding: '5px 8px', color: 'var(--fg-0)', fontSize: '12px', outline: 'none' },
-          onInput: e => { newReminderAt = e.target.value; },
+          onInput: e => { newReminderAt = e.target.value; drawerUi.reminderAt = e.target.value; },
         });
         const submitReminder = async () => {
           if (!newReminderAt) { toast('Pick a date and time first', 'error'); return; }
@@ -830,6 +848,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
           try {
             await API.addReminder(task.id, payload);
             newReminderAt = ''; newReminderEveryone = false;
+            drawerUi.reminderAt = ''; drawerUi.reminderEveryone = false;
             await loadReminders();
           } catch (e) { toast(e.message, 'error'); }
         };
@@ -838,7 +857,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
         const everyoneId = 'pm-remind-everyone-' + task.id;
         const everyoneBox = h('input', {
           type: 'checkbox', id: everyoneId, checked: newReminderEveryone,
-          onChange: e => { newReminderEveryone = e.target.checked; },
+          onChange: e => { newReminderEveryone = e.target.checked; drawerUi.reminderEveryone = e.target.checked; },
         });
         rsec.appendChild(h('div', { class: 'hstack', style: { gap: '8px', flexWrap: 'wrap' } },
           Icon('clock', 13),
@@ -1171,7 +1190,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
           comments = comments || [];
           comments.push(r.comment);
           cache.comments = comments;
-          newCommentText = '';
+          newCommentText = ''; drawerUi.comment = '';
           // A new comment can add watchers / mentions server-side; refresh task +
           // notifications + the per-task activity timeline.
           refreshBoard();
@@ -1184,7 +1203,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
       const composer = mentionTextarea({
         value: newCommentText,
         placeholder: 'Leave a comment… use @ to mention',
-        onInput: v => { newCommentText = v; },
+        onInput: v => { newCommentText = v; drawerUi.comment = v; },
         onSubmit: submit,
       });
       cmtSection.appendChild(h('div', { style: { display: 'flex', gap: '10px', marginTop: '12px' } },
@@ -1205,7 +1224,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
     }, 'Activity'));
     const tl = h('div', { class: 'timeline' });
     if (activity == null) {
-      tl.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'Loading…'));
+      tl.appendChild(SkeletonRows(3, { rowClass: 'skeleton-row', style: { marginTop: '2px' } }));
     } else if (!activity.length) {
       tl.appendChild(h('div', { style: { color: 'var(--fg-3)', fontSize: '12px' } }, 'No activity yet.'));
     } else {

@@ -922,6 +922,23 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
 .empty-cta h3 { margin: 0; font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--fg-0); letter-spacing: -0.01em; }
 .empty-cta p { margin: 0; font-size: var(--fs-md); color: var(--fg-2); line-height: 1.5; }
 
+/* ---------- Loading skeletons ---------- */
+/* A shimmering placeholder used instead of bare "Loading…" text. Built on the
+   surface tokens so it works in both themes; motion is dropped under
+   prefers-reduced-motion. Use via Skeleton()/SkeletonRows() in ui.js. */
+@keyframes pm-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-3) 25%, var(--bg-4) 37%, var(--bg-3) 63%);
+  background-size: 200% 100%;
+  animation: pm-shimmer 1.3s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+.skeleton-line { height: 12px; margin: 8px 0; }
+.skeleton-row  { height: 44px; border-radius: var(--radius); margin-bottom: 8px; }
+.skeleton-card { height: 92px; border-radius: var(--radius-lg); }
+.skeleton-rows { width: 100%; }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
 /* ---------- Dashboard responsive grid ---------- */
 .dash-grid {
   display: grid; grid-template-columns: repeat(12, 1fr);

@@ -446,7 +446,7 @@ function renderGoals(tasks, handlers) {
     if (isAdmin() && model.formOpen) root.appendChild(GoalForm());
 
     if (model.loading) {
-      root.appendChild(h('div', { class: 'empty', style: { padding: '48px 20px' } }, 'Loading goals…'));
+      root.appendChild(h('div', { style: { padding: '8px 0' } }, SkeletonRows(4, { rowClass: 'skeleton-card', style: { display: 'grid', gap: '12px' } })));
       return;
     }
 
