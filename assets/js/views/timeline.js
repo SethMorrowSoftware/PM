@@ -35,13 +35,24 @@ function renderTimeline(tasks, handlers = {}) {
   // --- view state (lifted to state.ui.timeline so it survives renderApp) ---
   const ui = (window.state.ui = window.state.ui || {});
   const tl = (ui.timeline = ui.timeline || {});
+  // First render this page load: restore the zoom that persist() saved. Keyed
+  // off a flag (not emptiness) because app.js boot state pre-seeds
+  // { zoom: 'week' }; after this, in-session state wins. The cursor
+  // deliberately resets so reloads open on today.
+  if (!tl.restored) {
+    tl.restored = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem('pm_timeline') || '{}').zoom;
+      if (saved === 'week' || saved === 'month') tl.zoom = saved;
+    } catch (_) {}
+  }
   if (tl.zoom !== 'week' && tl.zoom !== 'month') tl.zoom = 'week';
   if (!tl.cursor || isNaN(parseISO(tl.cursor)?.getTime?.())) tl.cursor = ymd(today());
 
   const root = h('div', { style: { padding: '20px', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } });
 
   function persist() {
-    try { localStorage.setItem('pm_timeline', JSON.stringify(tl)); } catch (_) {}
+    try { localStorage.setItem('pm_timeline', JSON.stringify({ zoom: tl.zoom, cursor: tl.cursor })); } catch (_) {}
   }
 
   function redraw() {
@@ -331,6 +342,29 @@ function renderTimeline(tasks, handlers = {}) {
       root.appendChild(h('div', { style: { marginTop: '10px', fontSize: '11.5px', color: 'var(--fg-3)' } },
         `${unscheduled.length} task${unscheduled.length === 1 ? '' : 's'} without dates are not shown — add a start or due date to schedule.`));
     }
+
+    // ---------- narrow-bar labels (measured after layout) ----------
+    // A one-day bar in week zoom is ~33px wide, so its ellipsized text collapses
+    // to a single letter ('A..'). Relocate the label to sit beside the bar
+    // instead (classic Gantt). rAF because px widths only exist once renderApp
+    // has mounted the root.
+    requestAnimationFrame(() => {
+      for (const { bar, grid } of barEls.values()) {
+        const inner = bar.firstElementChild;
+        if (!inner || bar.clientWidth >= 40) continue;
+        const label = h('span', { style: {
+          position: 'absolute', top: '50%', transform: 'translateY(-50%)',
+          fontSize: '10.5px', color: 'var(--fg-2)', whiteSpace: 'nowrap',
+          maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis',
+          pointerEvents: 'none', zIndex: '2',
+        } }, inner.textContent);
+        inner.textContent = '';
+        grid.appendChild(label);
+        const rightPx = bar.offsetLeft + bar.offsetWidth + 4;
+        if (rightPx + label.offsetWidth <= grid.clientWidth) label.style.left = rightPx + 'px';
+        else label.style.left = Math.max(0, bar.offsetLeft - label.offsetWidth - 4) + 'px';
+      }
+    });
 
     // ---------- dependency links (drawn after layout) ----------
     // For each visible task that is blocked_by a visible task, draw a thin

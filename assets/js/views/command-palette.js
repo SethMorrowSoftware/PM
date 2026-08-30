@@ -218,6 +218,9 @@
     }
 
     function onKey(e) {
+      // During IME composition every key (Enter/Escape/arrows) belongs to the
+      // candidate window — don't treat it as palette navigation.
+      if (imeGuard(e)) return;
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); setActive(active + 1); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active - 1); return; }

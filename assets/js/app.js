@@ -174,10 +174,17 @@
   window.pmCreateLabelFromPicker = (name, projectId) => createLabelFromPicker(name, projectId);
 
   // ----- v2 boot loads + helpers -----
+  let notifFingerprint = null;
   function loadNotifications() {
     return API.listNotifications().then(r => {
       state.notifications = r.notifications || [];
       state.unread = r.unread || 0;
+      // Only re-render when the payload actually changed: renderApp() replaces
+      // the whole root, which resets .content scroll position and any text
+      // selection — too destructive for a 60s poll tick that brings no news.
+      const fp = state.unread + ':' + state.notifications.length + ':' + (state.notifications[0]?.id ?? '');
+      if (fp === notifFingerprint) return;
+      notifFingerprint = fp;
       renderApp();
     }).catch(e => console.warn('Notifications load failed:', e));
   }
@@ -229,7 +236,12 @@
         state.settingsOpen || state.shortcutsOpen) return;
     // Also skip while an open popover/picker or the notification dropdown is on
     // screen — a full renderApp() would detach its anchor and mis-position it.
-    if (document.querySelector('.popover') || state.notifOpen) return;
+    // Visible-only check: the drawer keeps a permanently-mounted display:none
+    // mention menu (.popover) in the DOM that must not count as open.
+    if ([...document.querySelectorAll('.popover')].some(p => p.offsetParent !== null) || state.notifOpen) return;
+    // A tick landing mid pointer-drag would detach the dragged card's DOM and
+    // break the drop (makeDraggable sets this class on document.body).
+    if (document.body.classList.contains('dragging')) return;
     // The Activity and Goals views hold paging/scroll position and (Goals) an
     // in-progress create form in view-local state that a full renderApp() would
     // reset — skip the tick on them; the bell catches up on the next poll once
@@ -245,7 +257,13 @@
   // second closes the modal. The modal() helper manages its own dialogs.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (document.querySelector('.popover')) return;
+    // A stacked confirm/prompt dialog eats Escape in the capture phase via
+    // preventDefault (see modal() in ui.js) — defer so one Esc doesn't also
+    // close the settings/profile/quick-add surface beneath it.
+    if (e.defaultPrevented) return;
+    // Defer to VISIBLE popovers only: the drawer keeps a permanently-mounted
+    // display:none mention menu (.popover) in the DOM that must not block Esc.
+    if ([...document.querySelectorAll('.popover')].some(p => p.offsetParent !== null)) return;
     if (state.settingsOpen) { state.settingsOpen = false; renderApp(); }
     else if (state.profileOpen) { state.profileOpen = false; renderApp(); }
     else if (state.quickAddOpen) { state.quickAddOpen = false; state.quickAddDefaults = null; renderApp(); }
@@ -277,7 +295,13 @@
     const payload = { name, color: 'slate' };
     if (projectId != null) payload.project_id = projectId;
     const r = await API.createLabel(payload);
-    await refreshLabels();
+    // Refresh state.labels WITHOUT renderApp(): the caller is a label-picker
+    // popover floating over a live closure-held form (quick-add, drawer), and a
+    // full re-render would remount that form and wipe its in-progress draft.
+    // The open picker re-renders itself from state.labels once this resolves;
+    // other surfaces pick the label up on their next natural render.
+    try { state.labels = (await API.listLabels()).labels || []; }
+    catch (_) { if (r.label) state.labels = [...state.labels, r.label]; }
     return r.label;
   }
   async function updateTask(id, patch) {
@@ -447,7 +471,8 @@
       (state.milestones.find(m => m.id == t.milestone_id)?.name) || '',
     ]);
     const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    // UTF-8 BOM: without it Excel assumes ANSI and garbles non-ASCII titles.
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = h('a', { href: url, download: `castle-tasks-${ymd(today())}.csv` });
     document.body.appendChild(a);
@@ -479,7 +504,7 @@
       () => { state.hideDone = !state.hideDone; persist(); renderApp(); }, 'Filter');
     add(state.density === 'compact' ? 'Comfortable density' : 'Compact density', 'list', () => toggleDensity(), 'Display');
     add('Keyboard shortcuts', 'alert', () => { state.shortcutsOpen = true; renderApp(); }, 'Help');
-    for (const p of state.projects) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
+    for (const p of state.projects.filter(p => !p.archived)) add(`Filter: ${p.name}`, 'folder', () => { state.filterProject = p.id; if (state.view === 'dashboard') state.view = 'kanban'; persist(); renderApp(); }, 'Project');
 
     const taskItem = (t) => ({
       label: t.title, sublabel: t.ref, icon: 'checkSquare',
@@ -504,7 +529,16 @@
     // Server search can return a task not in the bulk-loaded set — fetch it on
     // demand so the drawer can render it.
     if (!state.tasks.some(t => t.id === id)) {
-      try { const r = await API.getTask(id); if (r.task) state.tasks = [r.task, ...state.tasks]; } catch (_) { /* ignore */ }
+      try { const r = await API.getTask(id); if (r.task) state.tasks = [r.task, ...state.tasks]; }
+      catch (e) {
+        // Deleted task or private project: say so (deep links, notifications,
+        // palette) instead of silently landing on the default board.
+        toast(e.status === 403 ? "You don't have access to that task — it's in a private project."
+          : e.status === 404 ? 'That task could not be found — it may have been deleted.'
+          : 'That task could not be opened.', 'error');
+        setTaskHash(null);
+        return;
+      }
     }
     state.openTaskId = id; setTaskHash(id); renderApp();
   }
@@ -619,7 +653,9 @@
     // Section: projects
     const projSection = h('div', { class: 'nav-section' });
     projSection.appendChild(h('div', { class: 'nav-label' }, 'Projects'));
-    for (const p of state.projects) {
+    // Archived projects stay manageable in Settings but are done work — keep
+    // them out of the everyday nav.
+    for (const p of state.projects.filter(p => !p.archived)) {
       const count = state.tasks.filter(t => t.project == p.id && t.status !== 'done').length;
       const isActive = state.filterProject == p.id;
       const row = h('div', clickable(() => {
@@ -771,8 +807,11 @@
         state.quickAddOpen = true;
         renderApp();
       },
-      onMoveTask: (id, s) => moveTask(id, s),
-      onToggleStatus: id => toggleStatus(id),
+      // Surface failures (network, server, stale can_write) — the drag paths
+      // toast their own errors, but these click paths would otherwise fail as
+      // silent unhandled rejections on a core action.
+      onMoveTask: (id, s) => moveTask(id, s).catch(e => toast(e.message || 'Update failed', 'error')),
+      onToggleStatus: id => toggleStatus(id).catch(e => toast(e.message || 'Update failed', 'error')),
       onBulkLabels: bulkUpdateLabels,
       onBulkUpdate: bulkUpdateTasks,
       onToggleSubtask: toggleSubtask,
@@ -1072,10 +1111,31 @@
           }));
           if (!savedViews.length) wrap.appendChild(h('div', { class: 'empty', style: { padding: '10px' } }, 'No saved views yet.'));
           savedViews.forEach(v => {
+            // Row applies the view; the trailing × deletes it (stopPropagation
+            // so the delete click doesn't also apply the row).
+            const del = h('button', {
+              class: 'icon-btn sm', title: `Delete saved view "${v.name}"`,
+              'aria-label': `Delete saved view ${v.name}`, style: { flexShrink: 0 },
+              onKeydown: e => { if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') e.stopPropagation(); },
+              onClick: async (e) => {
+                e.stopPropagation();
+                close(); // the popover would sit above the confirm dialog
+                if (!(await confirmDialog({ title: 'Delete saved view', message: `Delete "${v.name}"?`, confirmText: 'Delete', danger: true }))) return;
+                try {
+                  await API.deleteSavedView(v.id);
+                  state.savedViews = (state.savedViews || []).filter(x => x.id !== v.id);
+                  toast('Saved view deleted', 'success');
+                  renderApp();
+                } catch (err) { toast(err.message || 'Delete failed', 'error'); }
+              },
+            }, Icon('x', 12));
             wrap.appendChild(PopoverItem({
               selected: false,
               onSelect: () => { close(); applySavedView(v); },
-              children: h('span', null, v.name),
+              children: [
+                h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, v.name),
+                del,
+              ],
             }));
           });
           return wrap;
@@ -1180,7 +1240,7 @@
         class: 'modal-title-input', autofocus: true, placeholder: 'What needs to be done?',
         value: form.title,
         onInput: e => { form.title = e.target.value; submitBtn.disabled = !form.title.trim(); },
-        onKeydown: e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') close(); },
+        onKeydown: e => { if (imeGuard(e)) return; if (e.key === 'Enter') submit(); if (e.key === 'Escape') close(); },
       });
       head.appendChild(titleInput);
       modal.appendChild(head);
@@ -1316,7 +1376,9 @@
       head.appendChild(h('div', { style: { fontSize: '17px', fontWeight: '500' } }, 'Edit your profile'));
       modal.appendChild(head);
 
-      const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', gap: '12px', padding: '18px 20px' } });
+      // flexWrap nowrap: .modal-body defaults to wrap (quick-add relies on it),
+      // which would wrap this tall column into a clipped second column.
+      const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', flexWrap: 'nowrap', gap: '12px', padding: '18px 20px' } });
 
       const fieldStyle = {
         width: '100%', background: 'var(--bg-3)', border: '1px solid var(--line-2)',
@@ -1369,19 +1431,28 @@
       // Personal iCalendar feed: subscribe from Google/Apple/Outlook so due
       // dates show up next to real appointments. The URL is a capability —
       // Reset invalidates the old one.
+      // navigator.clipboard only exists in secure contexts — on a plain-HTTP
+      // cPanel deploy it's undefined, so fall back to showing the URL for
+      // manual copy instead of toasting a raw TypeError.
+      async function shareCalendarUrl(url, okMsg) {
+        try {
+          await navigator.clipboard.writeText(url);
+          toast(okMsg, 'success', { ms: 5000 });
+        } catch (_) {
+          await promptDialog({ title: 'Calendar link', label: 'Copy this URL, then paste it into Google/Apple Calendar under "Subscribe by URL"', value: url });
+        }
+      }
       const calRow = h('div', { class: 'hstack', style: { gap: '8px' } },
         h('button', { class: 'btn btn-ghost', onClick: async () => {
           try {
             const r = await API.icsMine();
-            await navigator.clipboard.writeText(r.url);
-            toast('Calendar link copied — paste it into Google/Apple Calendar under "Subscribe by URL"', 'success', { ms: 5000 });
+            await shareCalendarUrl(r.url, 'Calendar link copied — paste it into Google/Apple Calendar under "Subscribe by URL"');
           } catch (e) { toast(e.message || 'Could not fetch calendar link', 'error'); }
         } }, Icon('calendar', 13), ' Copy calendar link'),
         h('button', { class: 'btn btn-muted', title: 'Invalidate the old link and mint a new one', onClick: async () => {
           try {
             const r = await API.icsReset();
-            await navigator.clipboard.writeText(r.url);
-            toast('New calendar link copied — the old one no longer works', 'success', { ms: 5000 });
+            await shareCalendarUrl(r.url, 'New calendar link copied — the old one no longer works');
           } catch (e) { toast(e.message || 'Could not reset calendar link', 'error'); }
         } }, 'Reset link'),
       );
@@ -1404,7 +1475,7 @@
         h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '5px', fontWeight: '500' } }, 'New password'),
         h('input', { type: 'password', style: fieldStyle, value: form.password, autocomplete: 'new-password', minlength: 8,
           onInput: e => { form.password = e.target.value; },
-          onKeydown: e => { if (e.key === 'Enter') submit(); } }),
+          onKeydown: e => { if (imeGuard(e)) return; if (e.key === 'Enter') submit(); } }),
       ));
 
       modal.appendChild(body);
@@ -1763,12 +1834,15 @@
       model.recurringErr = '';
       redraw();
       try {
+        // Capture before resetRecurringForm() nulls f.id, or the toast always
+        // says "created" after an edit.
+        const wasEdit = !!f.id;
         if (f.id) await API.updateRecurring(f.id, payload);
         else await API.createRecurring(payload);
         resetRecurringForm();
         await refreshRecurringAdmin();
         await refreshTasks();
-        toast(f.id ? 'Recurring rule updated' : 'Recurring rule created', 'success');
+        toast(wasEdit ? 'Recurring rule updated' : 'Recurring rule created', 'success');
       } catch (e) {
         model.recurringErr = e.message || 'Failed to save recurring rule';
       } finally {
@@ -1810,6 +1884,9 @@
       model.err = '';
       redraw();
       try {
+        // Capture before resetForm() nulls the id, or the toast always says
+        // "created" after an edit.
+        const wasEdit = !!model.form.id;
         if (model.form.id) await API.updateProject(model.form.id, payload);
         else await API.createProject(payload);
         const [projects, tasks] = await Promise.all([API.listProjects(), API.listTasks()]);
@@ -1818,7 +1895,7 @@
         resetForm(null);
         await refreshProjects();
         renderApp();
-        toast(model.form.id ? 'Project updated' : 'Project created', 'success');
+        toast(wasEdit ? 'Project updated' : 'Project created', 'success');
       } catch (e) {
         model.err = e.message || 'Save failed';
       } finally {
@@ -1878,12 +1955,15 @@
       model.labelErr = '';
       redraw();
       try {
+        // Capture before resetLabelForm() nulls the id, or the toast always
+        // says "created" after an edit.
+        const wasEdit = !!model.labelForm.id;
         if (model.labelForm.id) await API.updateLabel(model.labelForm.id, payload);
         else await API.createLabel(payload);
         resetLabelForm(null);
         await refreshLabelsAdmin();
         await refreshLabels();
-        toast(model.labelForm.id ? 'Label updated' : 'Label created', 'success');
+        toast(wasEdit ? 'Label updated' : 'Label created', 'success');
       } catch (e) {
         model.labelErr = e.message || 'Save failed';
       } finally {
@@ -2180,7 +2260,9 @@
         ));
       }
 
-      if (!state.me?.is_admin) return;
+      // Members see only Projects + Labels — still build the rail so the left
+      // column isn't a permanently empty strip for them.
+      if (!state.me?.is_admin) { buildSettingsNav(rail, body); return; }
 
       body.appendChild(h('div', { class: 'settings-section-head', style: { marginTop: '20px' } },
         h('div', null,
@@ -2193,7 +2275,10 @@
         h('label', null, 'Project'),
         h('select', { value: model.recurringForm.project_id, onChange: e => { model.recurringForm.project_id = e.target.value; } },
           h('option', { value: '' }, 'Select project'),
-          state.projects.map(p => h('option', { value: String(p.id) }, p.name)),
+          // recurring.php 409s on archived projects — don't offer them, but
+          // keep the current selection visible when editing an older rule.
+          state.projects.filter(p => !p.archived || String(p.id) === model.recurringForm.project_id)
+            .map(p => h('option', { value: String(p.id) }, p.name)),
         ),
       ));
       recurringForm.appendChild(h('div', null,
@@ -2388,7 +2473,7 @@
       h('div', { class: 'modal-head-label' }, 'Help'),
       h('div', { style: { fontSize: '17px', fontWeight: '500' } }, 'Keyboard & shortcuts'),
     ));
-    const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', gap: '10px', padding: '18px 20px' } });
+    const body = h('div', { class: 'modal-body', style: { flexDirection: 'column', flexWrap: 'nowrap', gap: '10px', padding: '18px 20px' } });
     for (const [k, label] of rows) {
       body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' } },
         h('span', { style: { fontSize: '13px', color: 'var(--fg-1)' } }, label),

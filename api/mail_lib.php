@@ -11,6 +11,10 @@
 //                                      // default: derived from the request
 //   'mail_debug_dir' => '',            // if set, write .eml files instead of
 //                                      // sending (for local testing)
+//   'digest_hour'    => 7,             // earliest hour (0-23) for the morning
+//                                      // digest. PHP is pinned to UTC, so this
+//                                      // is a UTC hour — e.g. a 7am US-Eastern
+//                                      // digest needs 11 (EDT) / 12 (EST).
 
 require_once __DIR__ . '/db.php';
 
@@ -92,14 +96,22 @@ function pm_mail_notification(int $userId, string $type, string $body, ?int $tas
     } catch (Throwable $_) { /* best effort */ }
 }
 
+/** Earliest UTC hour the digest may send (config 'digest_hour', default 7). */
+function pm_mail_digest_hour(): int {
+    try { $c = pm_config(); } catch (Throwable $_) { return 7; }
+    $h = (int)($c['digest_hour'] ?? 7);
+    return ($h >= 0 && $h <= 23) ? $h : 7;
+}
+
 /**
- * Morning digest: once per user per day (after 07:00 server time), email a
- * short summary of overdue + due-today tasks. Driven from pm_run_due_sweep()
- * — no cron needed. Users with email_notifs != 'all' are skipped.
+ * Morning digest: once per user per day (after the configured digest hour —
+ * see 'digest_hour' above), email a short summary of overdue + due-today
+ * tasks. Driven from pm_run_due_sweep() — no cron needed. Users with
+ * email_notifs != 'all' are skipped.
  */
 function pm_mail_run_digests(): void {
     try {
-        if (!pm_mail_enabled() || (int)date('G') < 7) return;
+        if (!pm_mail_enabled() || (int)date('G') < pm_mail_digest_hour()) return;
         $users = pm_fetch_all(
             "SELECT id, email, name FROM users
              WHERE COALESCE(email_notifs,'all') = 'all'

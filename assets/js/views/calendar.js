@@ -50,8 +50,11 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
       if (task && task.start_date && task.due && task.start_date < task.due) {
         const deltaDays = Math.round((parseISO(iso) - parseISO(task.due)) / 86400000);
         if (deltaDays !== 0) {
-          const ns = ymd(new Date(parseISO(task.start_date).getTime() + deltaDays * 86400000));
-          const nd = ymd(new Date(parseISO(task.due).getTime() + deltaDays * 86400000));
+          // Shift by calendar days, not ms — adding N*24h across a DST fall-back
+          // lands at 23:00 the previous day and ymd() emits one day early.
+          const shiftDay = (s, n) => { const d = parseISO(s); d.setDate(d.getDate() + n); return ymd(d); };
+          const ns = shiftDay(task.start_date, deltaDays);
+          const nd = shiftDay(task.due, deltaDays);
           await API.updateTask(taskId, { start_date: ns, due: nd });
           window.pmRefreshTasks?.();
         }
@@ -295,10 +298,12 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         tabIndex: 0,
         role: 'button',
         title: t.title + ' — drag onto a day to set its due date',
-        style: proj ? {
+        // flex pinned inline: the mobile `.cal-event { flex: 1 1 100% }` rule
+        // would otherwise stretch chips into giant blocks in the rail's column flex.
+        style: Object.assign({ flex: '0 0 auto' }, proj ? {
           background: proj.color + '18', color: 'var(--fg-1)',
           borderLeft: '2px solid ' + proj.color,
-        } : {},
+        } : {}),
         onClick: (e) => { e.stopPropagation(); onOpenTask(t.id); },
         onKeydown: (e) => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onOpenTask(t.id); }

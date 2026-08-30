@@ -617,8 +617,10 @@ window.renderAdminExtras = function () {
       ),
     ));
     form.appendChild(h('div', null,
-      h('label', null, 'Estimate (min)'),
-      h('input', { type: 'number', min: '0', value: f.estimate, onInput: e => { f.estimate = e.target.value; } }),
+      // Hours, matching the recurring-rule form and workload.js parseEstimate
+      // (a bare number in tasks.estimate is read as hours).
+      h('label', null, 'Estimate (hours)'),
+      h('input', { type: 'number', min: '0', step: '0.25', value: f.estimate, onInput: e => { f.estimate = e.target.value; } }),
     ));
     form.appendChild(h('div', { class: 'full' },
       h('label', null, 'Description'),
@@ -715,7 +717,8 @@ window.renderAdminExtras = function () {
     redraw();
     try {
       const r = await API.listAutomations();
-      model.automations = r.automations || [];
+      // The endpoint follows the recurring-rules convention: {rules: [...]}.
+      model.automations = r.rules || [];
     } catch (e) {
       model.autoErr = e.message || 'Failed to load automations';
       toast(e.message || 'Failed to load automations', 'error');
@@ -928,7 +931,16 @@ window.renderAdminExtras = function () {
       h('label', null, 'Scope'),
       h('select', {
         value: f.project_id,
-        onChange: e => { f.project_id = e.target.value; if (f.condLabel && !labelsInScope(f.project_id).some(l => String(l.id) === f.condLabel)) f.condLabel = ''; redraw(); },
+        onChange: e => {
+          f.project_id = e.target.value;
+          if (f.condLabel && !labelsInScope(f.project_id).some(l => String(l.id) === f.condLabel)) f.condLabel = '';
+          // A scope change can strand add_label actions pointing at labels
+          // outside the new scope — the server 400s on save, so clear them.
+          (f.actions || []).forEach(a => {
+            if (a.type === 'add_label' && a.label_id && !labelsInScope(f.project_id).some(l => String(l.id) === String(a.label_id))) a.label_id = '';
+          });
+          redraw();
+        },
       },
         h('option', { value: '' }, 'Global'),
         (state.projects || []).map(p => h('option', { value: String(p.id) }, p.name)),

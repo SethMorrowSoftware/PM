@@ -314,8 +314,11 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
         onInput: e => { tempTitle = e.target.value; },
         onBlur: () => save(),
         onKeydown: e => {
+          if (imeGuard(e)) return;
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
-          if (e.key === 'Escape') { tempTitle = task.title; editingTitle = false; redraw(); }
+          // preventDefault so the document-level Escape handler doesn't also
+          // close the drawer when the user only meant to cancel the edit.
+          if (e.key === 'Escape') { e.preventDefault(); tempTitle = task.title; editingTitle = false; redraw(); }
         },
         style: {
           width: '100%', fontSize: '20px', fontWeight: '600', letterSpacing: '-0.01em',
@@ -747,8 +750,8 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
             refreshBoard();
           } catch (e) { toast(e.message, 'error'); }
         };
-        minInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
-        noteInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        minInput.addEventListener('keydown', e => { if (imeGuard(e)) return; if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
+        noteInput.addEventListener('keydown', e => { if (imeGuard(e)) return; if (e.key === 'Enter') { e.preventDefault(); submitTime(); } });
 
         // Live timer (one per user; starting here auto-stops any other task's
         // timer). The topbar shows the running chip with elapsed time.
@@ -808,12 +811,17 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
       const list = h('div', { style: { display: 'grid', gap: '6px', marginBottom: '10px' } });
       if (reminders && reminders.length) {
         for (const rm of reminders) {
+          // The API encodes "remind everyone on this task" as user_id=null
+          // (channel is always 'inapp'); personal reminders carry the owner's id.
+          const owner = rm.user_id != null ? userById(rm.user_id) : null;
           list.appendChild(h('div', { class: 'time-entry' },
             Icon('clock', 13),
             h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, fmtRemind(rm.remind_at)),
-            rm.everyone || rm.channel === 'everyone'
+            rm.user_id == null
               ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px' } }, Icon('users', 10), ' Everyone')
-              : null,
+              : (owner && owner.id !== window.state.me?.id
+                  ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px' }, title: 'Personal reminder for ' + owner.name }, Icon('user', 10), ' ' + owner.name.split(' ')[0])
+                  : null),
             rm.sent_at
               ? h('span', { class: 'chip', style: { fontSize: '10.5px', padding: '1px 6px', color: 'var(--green-fg)' }, title: 'Sent ' + relTime(rm.sent_at) }, Icon('check', 10), ' Sent')
               : null,
@@ -852,7 +860,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
             await loadReminders();
           } catch (e) { toast(e.message, 'error'); }
         };
-        whenInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
+        whenInput.addEventListener('keydown', e => { if (imeGuard(e)) return; if (e.key === 'Enter') { e.preventDefault(); submitReminder(); } });
 
         const everyoneId = 'pm-remind-everyone-' + task.id;
         const everyoneBox = h('input', {
@@ -969,6 +977,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
         style: { flex: 1, background: 'transparent', border: 'none', outline: 'none', fontSize: '13px', color: 'var(--fg-1)' },
         onInput: e => { newSubtaskText = e.target.value; },
         onKeydown: async e => {
+          if (imeGuard(e)) return;
           if (e.key === 'Enter' && newSubtaskText.trim()) {
             try {
               const text = newSubtaskText.trim();
@@ -998,22 +1007,28 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
       style: { fontSize: '11px', color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: '600', marginBottom: '10px' }
     }, `Attachments · ${attachments == null ? '…' : attachments.length}`));
 
-    // Delete control for an attachment row (respects read-only gating).
-    const attDeleteBtn = (a) => canWrite ? h('button', {
-      class: 'btn btn-ghost',
-      style: { fontSize: '11px', padding: '2px 6px' },
-      onClick: async () => {
-        const ok = await confirmDialog({ title: 'Delete attachment?', message: a.name, confirmText: 'Delete', danger: true });
-        if (!ok) return;
-        try {
-          await API.deleteAttachment(a.id);
-          attachments = attachments.filter(x => x.id !== a.id);
-          window._pmAttachmentsCache[task.id] = attachments;
-          task.attachments = Math.max(0, (task.attachments || 0) - 1);
-          redraw();
-        } catch (e) { toast(e.message, 'error'); }
-      },
-    }, 'Delete') : null;
+    // Delete control for an attachment row. Mirrors the server rule
+    // (api/attachments.php): uploader-or-admin, on a writable task. A null
+    // uploaded_by (deleted user) hides the button for non-admins, same as the API.
+    const attDeleteBtn = (a) => {
+      const me = window.state.me;
+      const canDelete = canWrite && me && (me.is_admin || a.uploaded_by === me.id);
+      return canDelete ? h('button', {
+        class: 'btn btn-ghost',
+        style: { fontSize: '11px', padding: '2px 6px' },
+        onClick: async () => {
+          const ok = await confirmDialog({ title: 'Delete attachment?', message: a.name, confirmText: 'Delete', danger: true });
+          if (!ok) return;
+          try {
+            await API.deleteAttachment(a.id);
+            attachments = attachments.filter(x => x.id !== a.id);
+            window._pmAttachmentsCache[task.id] = attachments;
+            task.attachments = Math.max(0, (task.attachments || 0) - 1);
+            redraw();
+          } catch (e) { toast(e.message, 'error'); }
+        },
+      }, 'Delete') : null;
+    };
 
     const attList = h('div', { style: { display: 'grid', gap: '8px' } });
     if (attachments && attachments.length) {
@@ -1144,7 +1159,17 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
                 try {
                   const r = await API.updateComment(task.id, c.id, next.trim());
                   const idx = comments.findIndex(x => x.id === c.id);
-                  if (idx >= 0) comments[idx] = r.comment;
+                  if (idx >= 0) {
+                    const updated = r.comment || comments[idx];
+                    // Servers that don't enrich the PATCH response return empty
+                    // reactions/mentions — keep what we already have rather than
+                    // wiping the bar/highlights until the next full reload.
+                    // (renderCommentBody only highlights names still in the body,
+                    // so stale mention ids are harmless.)
+                    if (!Array.isArray(updated.reactions) || !updated.reactions.length) updated.reactions = comments[idx].reactions || [];
+                    if (!Array.isArray(updated.mentions) || !updated.mentions.length) updated.mentions = comments[idx].mentions || [];
+                    comments[idx] = updated;
+                  }
                   cache.comments = comments;
                   redraw();
                 } catch (e) { toast(e.message, 'error'); }
@@ -1249,20 +1274,11 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
 
   // ----- accessibility: focus trap + Escape + return focus -----
   const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  // "Is a popover actually open?" — the comment composer's @mention menu is a
+  // permanently-mounted hidden `.popover` (ui.js mentionTextarea), so a bare
+  // querySelector('.popover') matches forever; only count visible ones.
+  const popoverOpen = () => [...document.querySelectorAll('.popover')].some(p => p.offsetParent !== null);
   function onKey(e) {
-    if (e.key === 'Escape') {
-      // Defer to any overlay above the drawer. modal()/confirmDialog()/
-      // promptDialog() handle Escape on a capture-phase document listener and
-      // call preventDefault (so by the time this bubble handler runs the modal
-      // is already gone but defaultPrevented is set). openPopover() closes on a
-      // bubble listener AFTER this one, so it's still in the DOM here — detect
-      // it directly. In either case, don't also close the drawer.
-      if (e.defaultPrevented) return;
-      if (document.querySelector('.popover') || document.querySelector('.modal')) return;
-      e.preventDefault();
-      onClose();
-      return;
-    }
     if (e.key !== 'Tab') return;
     // If an inner control already handled Tab (e.g. the @mention autocomplete
     // accepting a match), don't also run the focus trap.
@@ -1277,7 +1293,28 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
       if (active === last || !drawer.contains(active)) { e.preventDefault(); first.focus(); }
     }
   }
+  // Escape closes the drawer from a document-level listener (like modal()):
+  // focus often sits outside the drawer (e.g. on <body> after an async
+  // redraw()), where a drawer-bound handler would never see the keypress.
+  function onEsc(e) {
+    // Stale-closure guard: renderApp() re-creates the drawer, and this
+    // listener is only removed once the MutationObserver below sees the old
+    // node leave the DOM.
+    if (e.key !== 'Escape' || !document.body.contains(drawer)) return;
+    // Defer to any overlay above the drawer. modal()/confirmDialog()/
+    // promptDialog() and the attachment lightbox handle Escape on a
+    // capture-phase document listener and call preventDefault (so by the time
+    // this bubble handler runs the modal is already gone but defaultPrevented
+    // is set). openPopover() closes on a bubble listener registered AFTER this
+    // one, so it's still visible here — detect it directly. In either case,
+    // don't also close the drawer.
+    if (e.defaultPrevented) return;
+    if (popoverOpen() || document.querySelector('.modal')) return;
+    e.preventDefault();
+    onClose();
+  }
   drawer.addEventListener('keydown', onKey);
+  document.addEventListener('keydown', onEsc);
   // Restore focus when the drawer leaves the DOM (close, delete, or re-render
   // replacing the root). renderApp() removes this node; a re-render of the same
   // open task immediately re-adds a fresh one, so only restore focus if nothing
@@ -1285,6 +1322,7 @@ function renderTaskDetail(task, { onClose: _rawOnClose, onUpdate, onToggleSubtas
   const mo = new MutationObserver(() => {
     if (!document.body.contains(drawer)) {
       mo.disconnect();
+      document.removeEventListener('keydown', onEsc);
       setTimeout(() => {
         if (!document.querySelector('.drawer') && prevFocus && typeof prevFocus.focus === 'function') {
           try { prevFocus.focus(); } catch (_) {}

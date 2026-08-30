@@ -252,6 +252,11 @@ function sp_seed_data(): array {
             }
         }
 
+        // Mirror install.php's backfill: give every seeded task a distinct
+        // position. Kanban/List drag-reorder averages neighbour positions, so
+        // all-zero positions make interior drops land back where they started.
+        pm_exec('UPDATE tasks SET position = id WHERE position = 0');
+
         // Recurring preventive maintenance task templates (one per major project).
         foreach ($projectIds as $pName => $pid) {
             $assignees = json_encode([$userIds['Dylan'], $userIds['Izze']]);

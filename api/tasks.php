@@ -24,7 +24,11 @@ $method = pm_method();
 // and 404 in their handler. Falls back to "allow" if access_lib is absent.
 if ($id !== null && function_exists('pm_can_read_task')) {
     $accessUid = pm_current_user_id() ?? 0;
-    $ok = $method === 'GET' ? pm_can_read_task($accessUid, $id) : pm_can_write_task($accessUid, $id);
+    // Watch/unwatch only touch the caller's OWN task_watchers row (see
+    // pm_watch_task/pm_unwatch_task), so read access suffices — a viewer-role
+    // member may (un)subscribe. Every other non-GET still needs write access.
+    $needsWrite = $method !== 'GET' && !isset($_GET['watch']);
+    $ok = $needsWrite ? pm_can_write_task($accessUid, $id) : pm_can_read_task($accessUid, $id);
     if (!$ok) pm_error('Forbidden', 403);
 }
 
@@ -192,6 +196,9 @@ function pm_task_row_to_shape(array $t): array {
 }
 
 function pm_list_tasks(): void {
+    // Lazy recurring catch-up (no cron on shared hosting): rescue rules whose
+    // chain has no live tip. Self-throttled + best-effort inside.
+    try { pm_recurring_catch_up(); } catch (Throwable $_) {}
     // Restrict to projects the user can read. null = no restriction (admin, or
     // there are no private projects) → keep the cheap unfiltered query.
     $readable = function_exists('pm_readable_project_ids')
@@ -287,11 +294,18 @@ function pm_get_task(int $id): void {
     pm_json(['task' => pm_task_row_to_shape($t)]);
 }
 
-function pm_validate_label_ids_for_project(array $labelIds, int $projectId): array {
+// Validate a submitted label set for a project. Ids in $keepIds — the task's
+// currently-attached labels — are exempt from the archived/scope check:
+// archiving (or re-scoping) a label that is still attached must not 409 every
+// subsequent label toggle on the task, because the picker resends the FULL
+// current set and can't render the archived label to deselect it.
+function pm_validate_label_ids_for_project(array $labelIds, int $projectId, array $keepIds = []): array {
     $clean = array_values(array_unique(array_map('intval', $labelIds)));
     if (!$clean) return [];
-    $ph = implode(',', array_fill(0, count($clean), '?'));
-    $params = array_merge($clean, [$projectId]);
+    $check = array_values(array_diff($clean, array_map('intval', $keepIds)));
+    if (!$check) return $clean;
+    $ph = implode(',', array_fill(0, count($check), '?'));
+    $params = array_merge($check, [$projectId]);
     $rows = pm_fetch_all(
         "SELECT id FROM labels
          WHERE id IN ($ph)
@@ -301,7 +315,7 @@ function pm_validate_label_ids_for_project(array $labelIds, int $projectId): arr
     );
     $ok = array_map(fn($r) => (int)$r['id'], $rows);
     sort($ok);
-    $want = $clean;
+    $want = $check;
     sort($want);
     if ($ok !== $want) {
         pm_error('One or more labels are invalid, archived, or out of project scope', 409);
@@ -309,7 +323,12 @@ function pm_validate_label_ids_for_project(array $labelIds, int $projectId): arr
     return $clean;
 }
 
-function pm_validate_assignee_ids(array $assigneeIds): array {
+// Validate assignee ids exist. When $projectId is given, additionally reject
+// users who can't read that project — assigning a non-member to a private
+// project creates a "ghost" assignment (a task they can never open, plus a
+// leaked notification). function_exists-guarded so access_lib absence keeps
+// the legacy open model.
+function pm_validate_assignee_ids(array $assigneeIds, ?int $projectId = null): array {
     $clean = array_values(array_unique(array_map('intval', $assigneeIds)));
     if (!$clean) return [];
     $ph = implode(',', array_fill(0, count($clean), '?'));
@@ -320,6 +339,13 @@ function pm_validate_assignee_ids(array $assigneeIds): array {
     sort($want);
     if ($ok !== $want) {
         pm_error('One or more assignees are invalid', 409);
+    }
+    if ($projectId !== null && function_exists('pm_can_read_project')) {
+        foreach ($clean as $uid) {
+            if (!pm_can_read_project($uid, $projectId)) {
+                pm_error('One or more assignees do not have access to this project', 409);
+            }
+        }
     }
     return $clean;
 }
@@ -449,7 +475,7 @@ function pm_create_task(): void {
     }
 
     $labels = pm_validate_label_ids_for_project($labels, $project);
-    $assignees = pm_validate_assignee_ids($assignees);
+    $assignees = pm_validate_assignee_ids($assignees, $project);
 
     $prefix = $proj['key_prefix'] ?: pm_config()['project_key'];
 
@@ -648,11 +674,14 @@ function pm_update_task(int $id): void {
     $validLabels = null;
     if (array_key_exists('labels', $body) && is_array($body['labels'])) {
         $labelProject = array_key_exists('project', $body) ? (int)$body['project'] : (int)$t['project_id'];
-        $validLabels = pm_validate_label_ids_for_project($body['labels'], $labelProject);
+        $curLabels = array_map(fn($r) => (int)$r['label_id'],
+            pm_fetch_all('SELECT label_id FROM task_labels WHERE task_id = ?', [$id]));
+        $validLabels = pm_validate_label_ids_for_project($body['labels'], $labelProject, $curLabels);
     }
     $validAssignees = null;
     if (array_key_exists('assignees', $body) && is_array($body['assignees'])) {
-        $validAssignees = pm_validate_assignee_ids($body['assignees']);
+        $assigneeProject = array_key_exists('project', $body) ? (int)$body['project'] : (int)$t['project_id'];
+        $validAssignees = pm_validate_assignee_ids($body['assignees'], $assigneeProject);
     }
     $newlyAssigned = [];
     if ($validLabels !== null || $validAssignees !== null) {
@@ -829,14 +858,37 @@ function pm_milestone_id_for_project($raw, int $projectId): ?int {
 }
 
 function pm_delete_task(int $id): void {
-    $t = pm_fetch_one('SELECT id, title FROM tasks WHERE id = ?', [$id]);
+    $t = pm_fetch_one('SELECT id, ref, title, project_id, recurring_rule_id FROM tasks WHERE id = ?', [$id]);
     if (!$t) pm_error('Not found', 404);
     $atts = pm_fetch_all('SELECT stored_name FROM task_attachments WHERE task_id = ?', [$id]);
     // Log before the delete so activity.task_id can still FK-resolve the
-    // title in the listing, and so the entry survives the cascade.
-    pm_log_activity(pm_current_user_id(), null, 'deleted', $t['title'] ?? '');
+    // title in the listing, and so the entry survives the cascade. The row
+    // outlives the task with task_id NULL, which activity.php shows to every
+    // user (a task-less row can't be scoped) — so for private projects log
+    // only the ref, never the title. (The full fix needs a project_id column
+    // on activity; install.php schema changes are out of scope here.)
+    $detail = $t['title'] ?? '';
+    if (function_exists('pm_project_visibility')
+        && pm_project_visibility((int)$t['project_id']) === 'private') {
+        $detail = $t['ref'] ?? '';
+    }
+    pm_log_activity(pm_current_user_id(), null, 'deleted', $detail);
     pm_exec('DELETE FROM tasks WHERE id = ?', [$id]);
     foreach ($atts as $a) pm_attachment_delete_file((string)($a['stored_name'] ?? ''));
+    // Deleting the current TIP of a recurring chain would otherwise kill the
+    // rule forever: the dedup guard in pm_generate_next_recurring_task needs
+    // completedTaskId === last_task_id, and nothing else ever spawns. Reset
+    // the tip and spawn the replacement (a no-op when the rule is paused).
+    if (!empty($t['recurring_rule_id'])) {
+        try {
+            $ruleId = (int)$t['recurring_rule_id'];
+            $rule = pm_fetch_one('SELECT id, last_task_id FROM recurring_rules WHERE id = ?', [$ruleId]);
+            if ($rule && (int)$rule['last_task_id'] === $id) {
+                pm_exec('UPDATE recurring_rules SET last_task_id = NULL WHERE id = ?', [$ruleId]);
+                pm_generate_next_recurring_task($ruleId);
+            }
+        } catch (Throwable $_) { /* best effort */ }
+    }
     pm_json(['ok' => true]);
 }
 
@@ -988,12 +1040,24 @@ function pm_remove_reaction(int $taskId, int $commentId, string $emoji): void {
 
 // ---- comments ----
 function pm_comment_shape(array $r, array $reactions = [], array $mentions = []): array {
+    // System comments posted by the automation engine (automations_lib.php)
+    // carry user_id NULL and a robot-prefixed body — surface them as
+    // 'Automation', not the deleted-user fallback ('Former teammate'). The
+    // prefix is the only marker: the schema has no is_system column and
+    // install.php migrations are out of scope for this endpoint.
+    $isSystem = $r['user_id'] === null && strpos((string)($r['body'] ?? ''), '🤖 ') === 0;
     return [
         'id'         => (int)$r['id'],
         'body'       => $r['body'],
         'created_at' => $r['created_at'],
         'updated_at' => $r['updated_at'] ?? null,
-        'user'       => [
+        'is_system'  => $isSystem,
+        'user'       => $isSystem ? [
+            'id'       => null,
+            'name'     => 'Automation',
+            'initials' => '🤖',
+            'color'    => '#64748B',
+        ] : [
             'id'       => $r['user_id'] !== null ? (int)$r['user_id'] : null,
             'name'     => $r['name']     ?? 'Former teammate',
             'initials' => $r['initials'] ?? '??',
@@ -1111,6 +1175,11 @@ function pm_add_comment(int $taskId): void {
     $actor = pm_current_user_id();
     $mentionIds = [];
     try { $mentionIds = pm_resolve_mentions($body); } catch (Throwable $_) {}
+    // Drop mentioned users who can't read the task — a private-project comment
+    // must not create mention rows, watchers, or pings for non-members.
+    if (function_exists('pm_can_read_task')) {
+        $mentionIds = array_values(array_filter($mentionIds, fn($mid) => pm_can_read_task((int)$mid, $taskId)));
+    }
     try {
         // Notify task recipients (assignees ∪ watchers) minus the actor, and
         // minus anyone explicitly @-mentioned (they get a richer 'mention' ping).
@@ -1133,7 +1202,9 @@ function pm_add_comment(int $taskId): void {
         if (function_exists('pm_run_automations')) pm_run_automations('comment_added', $taskId, $actor);
     } catch (Throwable $_) { /* best effort */ }
 
-    pm_json(['comment' => pm_comment_shape($r)]);
+    // Include the just-inserted mention ids so the drawer can highlight them
+    // without a reload (it renders the response comment directly).
+    pm_json(['comment' => pm_comment_shape($r, [], array_map('intval', $mentionIds))]);
 }
 
 function pm_update_comment(int $taskId, int $commentId): void {
@@ -1160,11 +1231,51 @@ function pm_update_comment(int $taskId, int $commentId): void {
         [$commentId, $taskId]
     );
     $task = pm_fetch_one('SELECT * FROM tasks WHERE id = ?', [$taskId]);
-    if ($task) {
+
+    // Mirror the add path for mentions introduced by the edit (the classic
+    // typo-fix flow): persist comment_mentions, notify in-app, and subscribe as
+    // watcher — but only for NEWLY mentioned users, so re-saving a comment
+    // never re-pings people who were already mentioned.
+    $actor = pm_current_user_id();
+    $mentionIds = [];
+    try { $mentionIds = pm_resolve_mentions($body); } catch (Throwable $_) {}
+    if (function_exists('pm_can_read_task')) {
+        $mentionIds = array_values(array_filter($mentionIds, fn($mid) => pm_can_read_task((int)$mid, $taskId)));
+    }
+    $existingMentions = [];
+    try {
+        foreach (pm_fetch_all('SELECT user_id FROM comment_mentions WHERE comment_id = ?', [$commentId]) as $m) {
+            $existingMentions[] = (int)$m['user_id'];
+        }
+    } catch (Throwable $_) {}
+    $newMentions = array_values(array_diff(array_map('intval', $mentionIds), $existingMentions));
+    foreach ($newMentions as $muid) {
+        try { pm_exec('INSERT IGNORE INTO comment_mentions (comment_id, user_id) VALUES (?,?)', [$commentId, $muid]); } catch (Throwable $_) {}
+        try {
+            $mbody = pm_actor_name($actor) . ' mentioned you in ' . ($task['ref'] ?? ('#' . $taskId)) . ': ' . mb_substr($body, 0, 200);
+            pm_notify($muid, $actor, $taskId, 'mention', $mbody);
+        } catch (Throwable $_) {}
+        try { pm_add_watchers($taskId, [$muid]); } catch (Throwable $_) {}
+    }
+    // Activity + Slack ping only when the edit actually ADDED a mention —
+    // otherwise every re-save re-logs "mentioned X" for long-standing mentions.
+    if ($task && $newMentions) {
         $proj = pm_fetch_one('SELECT * FROM projects WHERE id = ?', [(int)$task['project_id']]);
         pm_notify_mentions($task, $proj, $body);
     }
-    pm_json(['comment' => pm_comment_shape($r)]);
+
+    // Return the COMPLETE comment payload — the drawer swaps this response into
+    // its cache, so default-empty reactions/mentions would wipe the pills and
+    // highlights until the next full reload.
+    $reactions = [];
+    try {
+        $reactions = pm_shape_reactions(
+            pm_fetch_all('SELECT user_id, emoji FROM comment_reactions WHERE comment_id = ?', [$commentId]),
+            (int)$me['id']
+        );
+    } catch (Throwable $_) {}
+    $allMentions = array_values(array_unique(array_merge($existingMentions, $newMentions)));
+    pm_json(['comment' => pm_comment_shape($r, $reactions, $allMentions)]);
 }
 
 function pm_delete_comment(int $taskId, int $commentId): void {
@@ -1249,10 +1360,21 @@ function pm_bulk_update_tasks(): void {
         }
     }
     // Pre-validate the assignees list once so a bogus id doesn't get caught
-    // mid-loop after we've already written to N tasks.
+    // mid-loop after we've already written to N tasks. Access is checked
+    // against every target project up-front for the same reason.
     $preValidatedAssignees = null;
     if (array_key_exists('assignees', $patch) && is_array($patch['assignees'])) {
         $preValidatedAssignees = pm_validate_assignee_ids($patch['assignees']);
+        if ($preValidatedAssignees && function_exists('pm_can_read_project')) {
+            if (array_key_exists('project', $patch)) {
+                pm_validate_assignee_ids($preValidatedAssignees, (int)$patch['project']);
+            } else {
+                $phT = implode(',', array_fill(0, count($ids), '?'));
+                foreach (pm_fetch_all("SELECT DISTINCT project_id FROM tasks WHERE id IN ($phT)", $ids) as $pr) {
+                    pm_validate_assignee_ids($preValidatedAssignees, (int)$pr['project_id']);
+                }
+            }
+        }
     }
     $updated = 0;
     foreach ($ids as $id) {
@@ -1280,16 +1402,24 @@ function pm_bulk_update_tasks(): void {
         }
         // Log status transitions to the activity feed so bulk moves aren't
         // invisible in the audit trail (bulk still intentionally skips the
-        // heavier notify/recurring/automation side-effects of the single path).
+        // heavier notify/automation side-effects of the single path).
         if (array_key_exists('status', $patch) && (string)$patch['status'] !== (string)$task['status']) {
             pm_log_activity(pm_current_user_id(), $id, 'moved', $task['status'] . ' → ' . $patch['status']);
             if ($patch['status'] === 'done') {
                 pm_log_activity(pm_current_user_id(), $id, 'completed', $task['title']);
+                // Keep recurring chains alive on bulk completion — otherwise the
+                // next occurrence is silently skipped. The generator's dedup
+                // guard (tip check) keeps this idempotent for older instances.
+                if (!empty($task['recurring_rule_id'])) {
+                    try { pm_generate_next_recurring_task((int)$task['recurring_rule_id'], $id); } catch (Throwable $_) {}
+                }
             }
         }
         if (array_key_exists('labels', $patch) && is_array($patch['labels'])) {
             $labelProject = array_key_exists('project', $patch) ? (int)$patch['project'] : (int)$task['project_id'];
-            $valid = pm_validate_label_ids_for_project($patch['labels'], $labelProject);
+            $curLabels = array_map(fn($r) => (int)$r['label_id'],
+                pm_fetch_all('SELECT label_id FROM task_labels WHERE task_id = ?', [$id]));
+            $valid = pm_validate_label_ids_for_project($patch['labels'], $labelProject, $curLabels);
             pm_exec('DELETE FROM task_labels WHERE task_id = ?', [$id]);
             foreach ($valid as $lid) pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$id, (int)$lid]);
         }
@@ -1457,6 +1587,38 @@ function pm_slack_notify_task_event(array $task, ?array $project, string $event,
         ], $fallback);
         pm_slack_post($channel, $text, ['event_key' => $event]);
     } catch (Throwable $_) { /* silent */ }
+}
+
+// Lazy catch-up for recurring rules whose chain has no live tip: rules created
+// via the API without an initial task (last_task_id NULL, next_run reached) or
+// whose tip was completed outside the single-task done path (e.g. an
+// automation's direct status write). Called from pm_list_tasks — the busiest
+// GET — and self-throttled via app_settings, mirroring pm_run_due_sweep's
+// atomic claim. Never spawns while the tip is still a live, not-done task.
+function pm_recurring_catch_up(): void {
+    try {
+        $now = time();
+        pm_exec("INSERT IGNORE INTO app_settings (name, value) VALUES ('recurring.last_catchup', '0')");
+        $claimed = pm_exec(
+            "UPDATE app_settings SET value = ?
+             WHERE name = 'recurring.last_catchup'
+               AND ? - CAST(TRIM('\"' FROM value) AS UNSIGNED) >= 300",
+            [json_encode($now), $now]
+        );
+        if ($claimed < 1) return; // another request already ran inside this window
+        $rules = pm_fetch_all(
+            'SELECT id, last_task_id FROM recurring_rules
+             WHERE paused = 0 AND next_run IS NOT NULL AND next_run <= ?',
+            [date('Y-m-d')]
+        );
+        foreach ($rules as $rule) {
+            if ($rule['last_task_id'] !== null) {
+                $tip = pm_fetch_one("SELECT id FROM tasks WHERE id = ? AND status <> 'done'", [(int)$rule['last_task_id']]);
+                if ($tip) continue; // live tip — the normal done path owns the spawn
+            }
+            pm_generate_next_recurring_task((int)$rule['id']);
+        }
+    } catch (Throwable $_) { /* best effort */ }
 }
 
 // When a task tied to a recurring rule is completed, spawn the next instance.

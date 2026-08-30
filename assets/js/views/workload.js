@@ -206,7 +206,7 @@ function WorkloadCard(row, maxOpen, onNavigate, parseEstimate) {
 
   // Metric chips: in progress / overdue / due this week.
   body.appendChild(h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-    MetricChip('In progress', m.inProgress.length, '#F59E0B'),
+    MetricChip('In progress', m.inProgress.length, m.inProgress.length > 0 ? 'var(--amber-fg)' : 'var(--fg-3)'),
     MetricChip('Overdue', m.overdue.length, m.overdue.length > 0 ? 'var(--red-fg)' : 'var(--fg-3)'),
     MetricChip('Due this week', m.dueWeek.length, m.dueWeek.length > 0 ? 'var(--amber-fg)' : 'var(--fg-3)'),
   ));

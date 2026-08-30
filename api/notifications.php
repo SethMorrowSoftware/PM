@@ -4,6 +4,8 @@ pm_boot();
 $uid = pm_require_auth();
 
 require_once __DIR__ . '/notify_lib.php';
+// Per-project access (guarded; notify_lib already includes it, kept explicit).
+if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.php';
 
 $method = pm_method();
 $id = pm_int_param('id');
@@ -12,12 +14,33 @@ $id = pm_int_param('id');
 // Best-effort and self-throttled inside notify_lib, so it's cheap on every hit.
 pm_run_due_sweep();
 
+// Hide notifications about tasks in private projects the user can't read —
+// covers rows created before a project went private (new leaks are blocked at
+// the source in pm_notify). Task-less rows and rows whose task was deleted
+// stay visible, matching the existing orphan behavior.
+$notifWhere = '';
+$notifParams = [$uid];
+if (function_exists('pm_readable_project_ids')) {
+    $readable = pm_readable_project_ids($uid);
+    if ($readable !== null) {
+        if ($readable) {
+            $ph = implode(',', array_fill(0, count($readable), '?'));
+            $notifWhere = " AND (n.task_id IS NULL OR t.id IS NULL OR t.project_id IN ($ph))";
+            foreach ($readable as $rid) $notifParams[] = (int)$rid;
+        } else {
+            $notifWhere = ' AND (n.task_id IS NULL OR t.id IS NULL)';
+        }
+    }
+}
+
 if ($method === 'GET') {
     // Cheap unread-count-only path (still ran the sweep above).
     if (pm_param('unread') !== null) {
         $row = pm_fetch_one(
-            'SELECT COUNT(*) AS c FROM notifications WHERE user_id = ? AND is_read = 0',
-            [$uid]
+            "SELECT COUNT(*) AS c FROM notifications n
+             LEFT JOIN tasks t ON t.id = n.task_id
+             WHERE n.user_id = ? AND n.is_read = 0$notifWhere",
+            $notifParams
         );
         pm_json(['unread' => (int)($row['c'] ?? 0)]);
     }
@@ -27,15 +50,18 @@ if ($method === 'GET') {
                 n.actor_id, u.name AS actor_name, u.initials AS actor_initials, u.color AS actor_color
          FROM notifications n
          LEFT JOIN users u ON u.id = n.actor_id
-         WHERE n.user_id = ?
+         LEFT JOIN tasks t ON t.id = n.task_id
+         WHERE n.user_id = ?$notifWhere
          ORDER BY n.id DESC
          LIMIT 50",
-        [$uid]
+        $notifParams
     );
 
     $unreadRow = pm_fetch_one(
-        'SELECT COUNT(*) AS c FROM notifications WHERE user_id = ? AND is_read = 0',
-        [$uid]
+        "SELECT COUNT(*) AS c FROM notifications n
+         LEFT JOIN tasks t ON t.id = n.task_id
+         WHERE n.user_id = ? AND n.is_read = 0$notifWhere",
+        $notifParams
     );
 
     pm_json([

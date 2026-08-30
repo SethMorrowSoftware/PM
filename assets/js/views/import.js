@@ -132,7 +132,7 @@
 
     const st = window.state || {};
     const users = st.users || [];
-    const labels = st.labels || [];
+    const allLabels = st.labels || [];
 
     const rows = matrix.slice(1).map((cells) => {
       const title = String(cellAt(cells, 'title') || '').trim();
@@ -145,7 +145,12 @@
       const description = String(cellAt(cells, 'description') || '');
       const estimate = String(cellAt(cells, 'estimate') || '').trim();
       const asg = resolveNames(cellAt(cells, 'assignees'), users);
-      const lbl = resolveNames(cellAt(cells, 'labels'), labels);
+      // Labels are per-project: resolve only against the row's project scope
+      // (global labels + that project's own), or the create endpoint 409s on
+      // an out-of-scope id even though the name "exists".
+      const scopedLabels = allLabels.filter(l =>
+        !l.archived && (l.project_id == null || Number(l.project_id) === Number(projectId)));
+      const lbl = resolveNames(cellAt(cells, 'labels'), scopedLabels);
 
       const warnings = [];
       // A given-but-unrecognized project name would otherwise be silently
@@ -157,7 +162,13 @@
       }
       if (dueRaw && !due) warnings.push(`due "${dueRaw}" is not YYYY-MM-DD`);
       if (asg.unknown.length) warnings.push('unknown assignee: ' + asg.unknown.join(', '));
-      if (lbl.unknown.length) warnings.push('unknown label: ' + lbl.unknown.join(', '));
+      if (lbl.unknown.length) {
+        // Distinguish a name that exists on another project from a typo.
+        const outOfScope = lbl.unknown.filter(nm => allLabels.some(l => norm(l.name) === norm(nm)));
+        const missing = lbl.unknown.filter(nm => !outOfScope.includes(nm));
+        if (outOfScope.length) warnings.push('label not in this project: ' + outOfScope.join(', '));
+        if (missing.length) warnings.push('unknown label: ' + missing.join(', '));
+      }
 
       const valid = !!title && projectId != null;
       return {
@@ -184,6 +195,7 @@
       validCount: 0,
       running: false,
       progress: '',     // "Imported N / M"
+      failures: [],     // per-row failure reasons from the last run
     };
 
     let bodyEl = null;     // the .modal-body we re-render into
@@ -194,6 +206,7 @@
       view.parseError = '';
       view.rows = [];
       view.validCount = 0;
+      view.failures = [];
       const text = view.raw.trim();
       if (!text) { redraw(); return; }
       let matrix;
@@ -257,14 +270,18 @@
 
       view.running = false;
       const ok = total - failures.length;
+      try { window.pmRefreshTasks && window.pmRefreshTasks(); } catch (_) { /* ignore */ }
       if (failures.length) {
-        console.warn('CSV import failures:', failures);
+        // Keep the modal open so the per-row reasons are visible (redraw also
+        // disables the import button, so the ok rows can't be re-created).
+        view.failures = failures;
+        view.progress = `Imported ${ok} of ${total}`;
         toast(`Imported ${ok} of ${total}; ${failures.length} failed`, ok ? 'info' : 'error');
+        redraw();
       } else {
         toast(`Imported ${ok} task${ok === 1 ? '' : 's'}`, 'success');
+        dlg && dlg.close();
       }
-      try { window.pmRefreshTasks && window.pmRefreshTasks(); } catch (_) { /* ignore */ }
-      dlg && dlg.close();
     }
 
     // ---- field styling shared with the rest of the app's modals ----
@@ -441,6 +458,23 @@
         }, view.parseError));
       }
 
+      // Per-row failures from the last run (modal stays open on partial failure).
+      if (view.failures.length) {
+        frag.appendChild(h('div', {
+          role: 'alert',
+          style: {
+            marginTop: '12px', padding: '8px 11px', borderRadius: '8px',
+            background: 'var(--red-soft, rgba(239,68,68,0.12))',
+            color: 'var(--red-fg, #EF4444)', fontSize: '12.5px',
+            border: '1px solid var(--line-2)',
+          },
+        },
+          h('div', { style: { fontWeight: '600', marginBottom: '4px' } },
+            `${view.failures.length} row${view.failures.length === 1 ? '' : 's'} failed to import:`),
+          view.failures.map(f => h('div', { style: { marginTop: '2px' } }, f)),
+        ));
+      }
+
       // Preview table.
       if (view.rows.length) frag.appendChild(renderPreview());
 
@@ -453,9 +487,11 @@
       window.h(bodyEl, null, renderBody());
       // Keep the footer action button in sync with state.
       if (importBtn) {
-        const can = view.validCount > 0 && !view.running;
+        // After a run with failures the button stays disabled (re-running would
+        // duplicate the rows that did import); reparsing re-enables it.
+        const can = view.validCount > 0 && !view.running && !view.failures.length;
         importBtn.disabled = !can;
-        importBtn.textContent = view.running
+        importBtn.textContent = (view.running || view.failures.length)
           ? (view.progress || 'Importing…')
           : (view.validCount ? `Import ${view.validCount} task${view.validCount === 1 ? '' : 's'}` : 'Import');
       }

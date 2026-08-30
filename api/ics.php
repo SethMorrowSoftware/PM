@@ -19,10 +19,16 @@ if (is_file(__DIR__ . '/access_lib.php')) require_once __DIR__ . '/access_lib.ph
 $feedToken = isset($_GET['t']) ? (string)$_GET['t'] : '';
 if ($feedToken !== '') {
     if (!preg_match('/^[a-f0-9]{32,64}$/', $feedToken)) { http_response_code(404); exit('Not found'); }
-    // Light rate limit so the endpoint can't be brute-forced for tokens.
+    // Rate limit per token so calendar apps sharing one office/NAT IP don't
+    // starve each other; the looser per-IP cap stays as an anti-enumeration
+    // backstop (checked second so a throttled subscriber's retries don't burn
+    // the shared IP budget).
     if (function_exists('pm_rate_limit')) {
         $ip = $_SERVER['REMOTE_ADDR'] ?? '0';
-        if (!pm_rate_limit('ics:' . $ip, 60, 3600)) { http_response_code(429); exit('Too many requests'); }
+        if (!pm_rate_limit('ics-t:' . $feedToken, 60, 3600)
+            || !pm_rate_limit('ics:' . $ip, 600, 3600)) {
+            http_response_code(429); exit('Too many requests');
+        }
     }
     $user = pm_fetch_one('SELECT id, name FROM users WHERE ics_token = ?', [$feedToken]);
     if (!$user) { http_response_code(404); exit('Not found'); }

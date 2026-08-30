@@ -51,10 +51,20 @@ switch ($action) {
         }
         session_regenerate_id(true);
         $_SESSION['uid'] = (int)$u['id'];
+        // Refund the per-(ip,email) budget: correct sign-ins shouldn't count
+        // toward the brute-force cap (staff sharing a front-desk machine can
+        // legitimately sign in 10+ times per window). The wider per-IP bucket
+        // stays untouched as a backstop.
+        pm_rate_limit_clear('login:' . $ip . ':' . $email);
         pm_json(['user' => pm_public_user($u)]);
     }
 
     case 'logout':
+        // POST-only, like every other session-mutating action. A GET here is
+        // CSRF-exempt (pm_csrf_check skips GET, and SameSite=Lax still sends
+        // the cookie on top-level GET navigations), so any third-party page
+        // could force-sign-out visitors. The frontend already POSTs (api.js).
+        if (pm_method() !== 'POST') pm_error('POST required', 405);
         $_SESSION = [];
         if (ini_get('session.use_cookies')) {
             $p = session_get_cookie_params();
@@ -161,4 +171,12 @@ function pm_make_initials(string $name): string {
 function pm_pick_color(): string {
     $colors = ['#3B82F6','#A855F7','#F59E0B','#22C55E','#EC4899','#06B6D4','#EF4444','#8B5CF6'];
     return $colors[array_rand($colors)];
+}
+
+// Drop one rate-limit bucket (used to refund the login throttle after a
+// successful sign-in). Mirrors the file layout pm_rate_limit uses in
+// bootstrap.php; best-effort like the limiter itself.
+function pm_rate_limit_clear(string $key): void {
+    try { @unlink(__DIR__ . '/../storage/ratelimit/' . sha1($key) . '.json'); }
+    catch (Throwable $_) { /* best effort */ }
 }
