@@ -201,7 +201,20 @@ function renderKanban(tasks, { onOpenTask, onMoveTask, onAddTask, onReorder, hid
       onMouseleave: e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--fg-3)'; },
     }, Icon('plus', 12), ' Add task'));
 
-    root.appendChild(h('div', { class: 'kb-col' }, head, body));
+    root.appendChild(h('div', { class: 'kb-col', dataset: { status: s.id, empty: colTasks.length ? '0' : '1' } }, head, body));
+  }
+
+  // On a phone each column fills the screen and the board snaps between them
+  // (see app.css), so whichever column happens to be first is the whole first
+  // impression. Opening on an empty Backlog reads as "there's nothing here" —
+  // start on the first column that actually has work in it instead.
+  if (pmIsPhone()) {
+    requestAnimationFrame(() => {
+      const first = root.querySelector('.kb-col[data-empty="0"]');
+      if (first && first !== root.firstElementChild) {
+        root.scrollLeft = first.offsetLeft - root.offsetLeft;
+      }
+    });
   }
   return root;
 }

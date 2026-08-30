@@ -2,8 +2,15 @@
 html, body { height: 100%; overflow: auto; }
 body.auth-body {
   background: radial-gradient(1200px 600px at 50% -20%, rgba(59,130,246,0.12), transparent 70%), var(--bg-0);
-  display: grid; place-items: center; padding: 40px 20px; min-height: 100vh;
+  display: grid; place-items: center;
+  /* dvh so the card centres against the visible viewport rather than the
+     taller "URL bar collapsed" one, and safe-area padding for notched phones. */
+  min-height: 100vh; min-height: 100dvh;
+  padding: 40px 20px;
+  padding-top: calc(40px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
 }
+* { -webkit-tap-highlight-color: transparent; }
 .auth-card {
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px;
   width: 100%; max-width: 400px; padding: 28px 28px 24px;
@@ -39,4 +46,21 @@ body.auth-body {
 .auth-err {
   background: var(--red-soft); border: 1px solid rgba(239,68,68,0.3);
   color: var(--red-fg); padding: 9px 11px; border-radius: 7px; font-size: 12.5px; margin-bottom: 12px;
+}
+
+/* ---------- Touch ---------- */
+/* Sub-16px text in a focused field makes iOS Safari zoom the page in and never
+   zoom back out — on a sign-in form that's the user's first impression of the
+   app. Grow the fields on coarse pointers and give them a real tap target. */
+@media (pointer: coarse) {
+  .field input { font-size: 16px; padding: 12px 13px; }
+  .field-row input { padding-right: 76px; }
+  .toggle-pass { min-height: 36px; display: flex; align-items: center; }
+  .auth-card .btn { padding: 13px; min-height: 48px; font-size: 15px; }
+  .auth-foot { font-size: 13.5px; }
+}
+@media (max-width: 480px) {
+  body.auth-body { padding-left: 16px; padding-right: 16px; }
+  .auth-card { padding: 22px 20px 20px; border-radius: 16px; }
+  .auth-card h1 { font-size: 22px; }
 }

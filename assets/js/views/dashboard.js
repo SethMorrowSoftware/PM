@@ -777,6 +777,10 @@ function FocusRow(task, onClick) {
   const subDone = sub.filter(s => s.done).length;
   const row = h('div', {
     onClick,
+    // focus-row/-main/-meta let the phone stylesheet drop the trailing meta
+    // (subtask count, labels, due) onto its own line instead of squeezing the
+    // title and project name into half a narrow screen.
+    class: 'focus-row',
     style: {
       display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px',
       borderTop: '1px solid var(--line)', cursor: 'pointer', transition: 'background 0.1s',
@@ -785,22 +789,23 @@ function FocusRow(task, onClick) {
     onMouseleave: e => e.currentTarget.style.background = 'transparent',
   });
   row.appendChild(PriorityFlag(task.priority));
-  const body = h('div', { style: { flex: 1, minWidth: 0 } });
-  body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-    h('span', { class: 'mono', style: { fontSize: '10.5px', color: 'var(--fg-3)' } }, task.ref),
-    h('span', { style: { width: '4px', height: '4px', borderRadius: '50%', background: 'var(--fg-4)' } }),
-    proj ? h('span', { style: { fontSize: '11px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)` } }, proj.name) : null,
+  const body = h('div', { class: 'focus-main', style: { flex: 1, minWidth: 0 } });
+  body.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
+    h('span', { class: 'mono', style: { fontSize: '10.5px', color: 'var(--fg-3)', flexShrink: 0 } }, task.ref),
+    h('span', { style: { width: '4px', height: '4px', borderRadius: '50%', background: 'var(--fg-4)', flexShrink: 0 } }),
+    proj ? h('span', { style: { fontSize: '11px', color: `color-mix(in srgb, ${proj.color}, var(--fg-0) 40%)`,
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, proj.name) : null,
   ));
   body.appendChild(h('div', {
     style: { fontSize: '13.5px', fontWeight: '500', marginTop: '2px',
       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
   }, task.title));
   row.appendChild(body);
-  if (sub.length > 0) row.appendChild(h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, `${subDone}/${sub.length}`));
-  const labelRow = h('div', { class: 'hstack', style: { gap: '8px' } });
-  task.labels.slice(0, 2).forEach(l => labelRow.appendChild(Tag(l, true)));
-  row.appendChild(labelRow);
-  if (task.due) row.appendChild(DueDate(task.due, true));
+  const meta = h('div', { class: 'focus-meta hstack', style: { gap: '8px', flexShrink: 0 } });
+  if (sub.length > 0) meta.appendChild(h('span', { class: 'mono', style: { fontSize: '11px', color: 'var(--fg-3)' } }, `${subDone}/${sub.length}`));
+  task.labels.slice(0, 2).forEach(l => meta.appendChild(Tag(l, true)));
+  if (task.due) meta.appendChild(DueDate(task.due, true));
+  row.appendChild(meta);
   return row;
 }
 

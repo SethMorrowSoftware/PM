@@ -198,6 +198,46 @@ additive migrations, then delete it). Each row: member vs admin where relevant.
   Kanban/Calendar drag works by touch.
 - Theme toggle switches light/dark and persists; no flash on reload; auth pages
   honor it. `prefers-color-scheme` applies when no explicit choice.
+
+#### 9.4a Mobile UI/UX (run on a real phone, or DevTools device mode at 390×844)
+
+Scrolling is the thing to be strict about — the failure mode is a gesture that
+does nothing, which reads as a frozen app rather than a layout bug.
+
+- [ ] **Scroll from anywhere.** On Kanban, List, My tasks, Calendar and the task
+  drawer, start a flick **on a card / row / event** (not in the gutter). The
+  content scrolls every time. A gesture that "sticks" means something re-grew a
+  blanket `touch-action: none` — see `makeDraggable` in `assets/js/ui.js`.
+- [ ] **Drag still works.** Press and hold a Kanban card ~0.3s: it lifts (and
+  buzzes on a device that supports it), then drags between columns. Same for a
+  calendar event and a timeline bar. In List, switch Sort to **Manual** and drag
+  by the grip — that one starts immediately, no long press.
+- [ ] **One scroller per axis.** The page itself never scrolls: the URL bar
+  should not hide/show as you scroll a list, and there is no second scrollbar.
+  The bottom nav and top bar stay put.
+- [ ] **Nothing off-screen.** No horizontal scrollbar on any view at 390px and
+  at 360px. Rotate to landscape: the bottom nav hides and the toolbar tightens.
+- [ ] **Chrome budget.** Kanban/List show the first task within roughly the top
+  third of the screen — one toolbar row (view rail + **Filters**), not four.
+- [ ] **Filters sheet.** Tap **Filters** → bottom sheet with Project / Assignee /
+  Labels / Completed tasks / Saved views, each showing its current value.
+  Setting one updates the row in place *and* badges the Filters button with the
+  active count. Import / Export / task count are in its footer.
+- [ ] **Pickers reach.** Open any picker (project, assignee, label, date, status)
+  from a control near the bottom of the screen: it opens as a bottom sheet fully
+  on-screen, never clipped, and no keyboard springs up over it.
+- [ ] **No zoom on focus (iOS).** Tap the search field, a comment box, the
+  quick-add title, and the login form: the page must not zoom in. Any field
+  under 16px will do it.
+- [ ] **Sheets and safe areas.** Quick-add, profile and confirm dialogs dock to
+  the bottom with full-width actions; Settings is full-screen; nothing hides
+  under the home indicator or the notch.
+- [ ] **Calendar agenda.** A month with a few tasks opens on those tasks — empty
+  days are dropped, today is always present, and no event overlaps the next
+  day's date. An empty month says "Nothing scheduled this month."
+- [ ] **Drawer header.** Open a task in a long-named project: the ref, project
+  name and action row stay on one line (project name truncates) and the header
+  stays pinned while the body scrolls.
 - App is installable (manifest + service worker); offline shows the shell; API
   calls are never served stale from cache.
 - Upload a `.svg`/unknown file → it downloads as `application/octet-stream`
