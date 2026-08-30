@@ -64,6 +64,11 @@ function renderList(tasks, handlers) {
     } else {
       groups = window.state.users.map(u => ({ key: 'u' + u.id, title: u.name, color: u.color,
         tasks: tasks.filter(t => t.assignees.includes(u.id)) }));
+      // Tasks with no assignees match no user group and would silently vanish
+      // from the view — collect them in an Unassigned bucket (hidden when empty
+      // by the groups.filter below).
+      groups.push({ key: 'u0', title: 'Unassigned', color: 'var(--fg-4)',
+        tasks: tasks.filter(t => !(t.assignees || []).length) });
     }
 
     const dir = ls.sortDir === 'desc' ? -1 : 1;
@@ -170,7 +175,11 @@ function renderList(tasks, handlers) {
               if (a > -1 && b > -1) {
                 const [lo, hi] = a < b ? [a, b] : [b, a];
                 const s = selSet();
-                for (let i = lo; i <= hi; i++) s.add(visibleIds[i]);
+                // Range-add only writable rows — same rule as select-all and the
+                // per-row checkboxes (bulk actions 403 on read-only tasks).
+                for (let i = lo; i <= hi; i++) {
+                  if (selectableIds.includes(visibleIds[i])) s.add(visibleIds[i]);
+                }
                 ls.selected = [...s];
                 lastClickedId = t.id;
                 redraw();
@@ -196,38 +205,54 @@ function renderList(tasks, handlers) {
   }
 
   // ---------- bulk action bar ----------
+  // Each action snapshots the ids and clears the selection BEFORE awaiting: the
+  // bulk update triggers pmRefreshTasks -> renderApp(), which builds a NEW
+  // renderList instance reading the shared ls.selected — clearing only after
+  // the await would leave that fresh DOM showing a stale "N selected" bar and
+  // checked rows. On failure the refresh never ran (this root is still live),
+  // so restore the selection for retry.
   function bulkBar() {
     const mk = (label, onClick) => h('button', {
       class: 'btn btn-ghost', style: { padding: '4px 8px', fontSize: '12px' }, onClick,
     }, label);
+    const takeSelection = () => { const ids = [...ls.selected]; clearSelection(); return ids; };
+    const restoreSelection = (ids, err) => {
+      ls.selected = ids;
+      redraw();
+      toast(err.message || 'Bulk update failed', 'error');
+    };
     return h('div', { class: 'hstack', style: {
       marginLeft: 'auto', gap: '6px', background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: '8px', padding: '3px 6px',
     } },
       h('span', { style: { fontSize: '12px', color: 'var(--fg-2)', marginRight: '4px' } }, `${ls.selected.length} selected`),
       mk('Add label', (e) => {
         openPopover(e.currentTarget, ({ close }) => labelPickerContent([], lid => {
-          onBulkLabels?.([...ls.selected], [lid], 'add')
-            .then(() => { close(); clearSelection(); redraw(); })
-            .catch(err => toast(err.message || 'Bulk update failed', 'error'));
+          const ids = takeSelection();
+          onBulkLabels?.(ids, [lid], 'add')
+            .then(() => close())
+            .catch(err => restoreSelection(ids, err));
         }, close, { keepOpen: true, onCreateLabel: window.pmCreateLabelFromPicker }));
       }),
       mk('Remove label', (e) => {
         openPopover(e.currentTarget, ({ close }) => labelPickerContent([], lid => {
-          onBulkLabels?.([...ls.selected], [lid], 'remove')
-            .then(() => { close(); clearSelection(); redraw(); })
-            .catch(err => toast(err.message || 'Bulk update failed', 'error'));
+          const ids = takeSelection();
+          onBulkLabels?.(ids, [lid], 'remove')
+            .then(() => close())
+            .catch(err => restoreSelection(ids, err));
         }, close, { keepOpen: true }));
       }),
       mk('Mark done', async () => {
-        try { await onBulkUpdate?.([...ls.selected], { status: 'done' }, 'Marked done'); clearSelection(); redraw(); }
-        catch (err) { toast(err.message || 'Bulk update failed', 'error'); }
+        const ids = takeSelection();
+        try { await onBulkUpdate?.(ids, { status: 'done' }, 'Marked done'); }
+        catch (err) { restoreSelection(ids, err); }
       }),
       h('button', {
         class: 'btn btn-ghost', style: { padding: '4px 8px', fontSize: '12px' },
         onClick: (e) => {
           datePickerPopover(e.currentTarget, '', async (val) => {
-            try { await onBulkUpdate?.([...ls.selected], { due: val || null }, 'Updated due date'); clearSelection(); redraw(); }
-            catch (err) { toast(err.message || 'Bulk update failed', 'error'); }
+            const ids = takeSelection();
+            try { await onBulkUpdate?.(ids, { due: val || null }, 'Updated due date'); }
+            catch (err) { restoreSelection(ids, err); }
           });
         },
       }, 'Set due'),
@@ -249,7 +274,9 @@ function renderList(tasks, handlers) {
           e.stopPropagation();
           const statusId = ls.groupBy === 'status' ? g.key : undefined;
           const projectId = ls.groupBy === 'project' ? parseInt(String(g.key).slice(1), 10) : undefined;
-          const assigneeId = ls.groupBy === 'assignee' ? parseInt(String(g.key).slice(1), 10) : undefined;
+          // 'u0' is the Unassigned bucket — its quick-add must not pre-fill user id 0.
+          const aid = ls.groupBy === 'assignee' ? parseInt(String(g.key).slice(1), 10) : 0;
+          const assigneeId = aid > 0 ? aid : undefined;
           onAddTask(statusId, { projectId, assigneeId });
         } },
         Icon('plus', 11), ' Add'),

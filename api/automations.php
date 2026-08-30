@@ -56,8 +56,13 @@ function pm_automation_clean_conditions($raw): array {
     return $out;
 }
 
-/** Validate + normalize the actions array. Must be a non-empty list of valid actions. */
-function pm_automation_clean_actions($raw): array {
+/**
+ * Validate + normalize the actions array. Must be a non-empty list of valid
+ * actions. $projectId is the rule's scope (null = global) so add_label can be
+ * checked against it — an out-of-scope label would poison the task (every
+ * later label edit 409s in pm_validate_label_ids_for_project).
+ */
+function pm_automation_clean_actions($raw, ?int $projectId): array {
     if (!is_array($raw) || $raw === [] || array_keys($raw) !== range(0, count($raw) - 1)) {
         pm_error('actions must be a non-empty array');
     }
@@ -84,6 +89,12 @@ function pm_automation_clean_actions($raw): array {
             case 'add_label': {
                 $lid = (int)($a['label_id'] ?? 0);
                 if ($lid <= 0) pm_error('add_label requires a positive label_id');
+                // Mirror pm_validate_label_ids_for_project: global rules may
+                // only add global labels; project rules also their own.
+                $lbl = pm_fetch_one('SELECT project_id FROM labels WHERE id = ? AND archived = 0', [$lid]);
+                if (!$lbl || ($lbl['project_id'] !== null && (int)$lbl['project_id'] !== $projectId)) {
+                    pm_error('add_label label is invalid, archived, or out of the rule\'s project scope');
+                }
                 $out[] = ['type' => 'add_label', 'label_id' => $lid];
                 break;
             }
@@ -169,7 +180,7 @@ if ($method === 'POST' && $id === null) {
 
     $projectId  = pm_automation_project_id($body['project_id'] ?? null);
     $conditions = pm_automation_clean_conditions($body['conditions'] ?? []);
-    $actions    = pm_automation_clean_actions($body['actions'] ?? []);
+    $actions    = pm_automation_clean_actions($body['actions'] ?? [], $projectId);
     $enabled    = array_key_exists('enabled', $body) ? (!empty($body['enabled']) ? 1 : 0) : 1;
 
     pm_exec(
@@ -195,6 +206,9 @@ if ($method === 'PATCH' && $id !== null) {
 
     $set = [];
     $args = [];
+    // Scope for validating actions: the new project if this PATCH changes it,
+    // else the rule's stored one.
+    $effProjectId = $r['project_id'] === null ? null : (int)$r['project_id'];
 
     if (array_key_exists('name', $body)) {
         $name = trim((string)$body['name']);
@@ -203,7 +217,8 @@ if ($method === 'PATCH' && $id !== null) {
         $set[] = 'name = ?'; $args[] = $name;
     }
     if (array_key_exists('project_id', $body)) {
-        $set[] = 'project_id = ?'; $args[] = pm_automation_project_id($body['project_id']);
+        $effProjectId = pm_automation_project_id($body['project_id']);
+        $set[] = 'project_id = ?'; $args[] = $effProjectId;
     }
     if (array_key_exists('trigger_event', $body)) {
         $trigger = (string)$body['trigger_event'];
@@ -216,7 +231,7 @@ if ($method === 'PATCH' && $id !== null) {
         $set[] = 'conditions_json = ?'; $args[] = json_encode(pm_automation_clean_conditions($body['conditions']));
     }
     if (array_key_exists('actions', $body)) {
-        $set[] = 'actions_json = ?'; $args[] = json_encode(pm_automation_clean_actions($body['actions']));
+        $set[] = 'actions_json = ?'; $args[] = json_encode(pm_automation_clean_actions($body['actions'], $effProjectId));
     }
     if (array_key_exists('enabled', $body)) {
         $set[] = 'enabled = ?'; $args[] = !empty($body['enabled']) ? 1 : 0;

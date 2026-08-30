@@ -337,7 +337,9 @@ function labelPickerContent(selectedIds, onToggle, close, { keepOpen = false, sc
   function render(query = '') {
     list.replaceChildren();
     const q = query.toLowerCase();
-    const labels = S().labels.filter(l => !l.archived && inScope(l) && l.name.toLowerCase().includes(q));
+    // Archived / out-of-scope labels stay listed while attached so they can
+    // still be deselected (the server exempts already-attached ids too).
+    const labels = S().labels.filter(l => (selected.has(Number(l.id)) || (!l.archived && inScope(l))) && l.name.toLowerCase().includes(q));
     for (const l of labels) {
       list.appendChild(PopoverItem({
         selected: selected.has(Number(l.id)),
@@ -348,6 +350,7 @@ function labelPickerContent(selectedIds, onToggle, close, { keepOpen = false, sc
           if (!keepOpen) close(); else render(input.value);
         },
         leading: Tag(l.id),
+        children: l.archived ? h('span', { class: 'pill muted', style: { marginLeft: '6px' } }, 'Archived') : null,
       }));
     }
     const exact = labels.some(l => l.name.toLowerCase() === q);
@@ -366,6 +369,7 @@ function labelPickerContent(selectedIds, onToggle, close, { keepOpen = false, sc
   }
   input.addEventListener('input', e => render(e.target.value));
   input.addEventListener('keydown', async e => {
+    if (imeGuard(e)) return;
     if (e.key === 'Enter' && typeof onCreateLabel === 'function' && input.value.trim()) {
       e.preventDefault();
       try { await createFromQuery(input.value); if (!keepOpen) close(); else render(''); }
@@ -407,16 +411,25 @@ function priorityPickerContent(value, onChange, close) {
 function projectPickerContent(value, onChange, close) {
   const wrap = h('div');
   wrap.appendChild(h('div', { class: 'popover-header' }, 'Project'));
-  for (const p of S().projects) {
+  // Archived projects reject new tasks (server 409s), so don't offer them —
+  // but keep the currently-selected one visible (flagged) so a task already
+  // living in an archived project still shows its project.
+  for (const p of S().projects.filter(p => !p.archived || p.id == value)) {
     wrap.appendChild(PopoverItem({
       selected: value == p.id,
       onSelect: () => { onChange(p.id); close(); },
       leading: h('span', { style: { width: '10px', height: '10px', borderRadius: '3px', background: p.color } }),
-      children: h('span', null, p.name),
+      children: h('span', null, p.name, p.archived ? h('span', { class: 'pill muted', style: { marginLeft: '6px' } }, 'Archived') : null),
     }));
   }
   return wrap;
 }
+
+// -------- IME guard --------
+// True while an IME composition is being committed (keyCode 229 covers the
+// stray post-compositionend Enter Safari fires). Every Enter-submits keydown
+// handler must bail on this, or CJK users get half-composed text submitted.
+function imeGuard(e) { return e.isComposing || e.keyCode === 229; }
 
 // -------- Toast --------
 // toast(msg, kind, ms) — or pass an options object as the third argument to
@@ -590,9 +603,9 @@ function promptDialog({ title = 'Enter a value', label = '', value = '', placeho
       : h('input', { class: 'input', type: 'text', placeholder, value, style: { width: '100%' } });
     if (multiline) field.value = value || '';
     if (!multiline) {
-      field.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); finish(field.value); } });
+      field.addEventListener('keydown', e => { if (imeGuard(e)) return; if (e.key === 'Enter') { e.preventDefault(); finish(field.value); } });
     } else {
-      field.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(field.value); } });
+      field.addEventListener('keydown', e => { if (imeGuard(e)) return; if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(field.value); } });
     }
     const bodyKids = [];
     if (label) bodyKids.push(h('label', { style: { display: 'block', fontSize: '12px', color: 'var(--fg-2)', marginBottom: '6px' } }, label));
@@ -748,6 +761,9 @@ function mentionTextarea({ value = '', onInput, onSubmit, placeholder = '', rows
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMenu();
   });
   ta.addEventListener('keydown', e => {
+    // During IME composition, Enter/Arrows/Tab/Escape belong to the candidate
+    // window — don't submit, navigate the mention menu, or close anything.
+    if (imeGuard(e)) return;
     const open = menu.style.display !== 'none' && matches.length;
     if (open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
@@ -962,6 +978,7 @@ window.statusPickerContent = statusPickerContent;
 window.priorityPickerContent = priorityPickerContent;
 window.projectPickerContent = projectPickerContent;
 window.toast = toast;
+window.imeGuard = imeGuard;
 window.PRIO_LABELS = PRIO_LABELS;
 window.relTime = relTime;
 window.fmtMinutes = fmtMinutes;
@@ -1020,10 +1037,17 @@ function renderMarkdown(text) {
         ? '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + '</a>' : m);
     x = x.replace(/(^|[\s(])((?:https?:\/\/)[^\s<]+)/g, (m, pre, url) =>
       pre + '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url.replace(/&amp;/g, '&') + '</a>');
-    x = x.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
-    x = x.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>')
-         .replace(/(^|[^_\w])_([^_\s][^_]*?)_/g, '$1<em>$2</em>');
-    return x;
+    // Emphasis must not rewrite the generated <a> tags — URLs routinely contain
+    // _ and * — so isolate them the same way code spans are isolated above.
+    // Input is fully escaped before inline() runs, so a literal '<a ' can only
+    // originate from the two link transforms.
+    return x.split(/(<a [^>]*>[\s\S]*?<\/a>)/g).map(seg => {
+      if (seg.startsWith('<a ')) return seg;
+      return seg
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>')
+        .replace(/(^|[^_\w])_([^_\s][^_]*?)_/g, '$1<em>$2</em>');
+    }).join('');
   }).join('');
 
   const lines = esc(src).split(/\r?\n/);

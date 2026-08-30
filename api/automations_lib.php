@@ -126,6 +126,15 @@ function pm_automation_apply(array $rule, array $task, int $taskId, ?int $actorI
                 case 'add_label': {
                     $lid = (int)($action['label_id'] ?? 0);
                     if ($lid <= 0) break;
+                    // Skip deleted/archived labels and any label scoped to a
+                    // different project than the task (stale rules): a foreign
+                    // label on the task makes every later label edit 409 in
+                    // pm_validate_label_ids_for_project.
+                    $lbl = pm_fetch_one('SELECT project_id, archived FROM labels WHERE id = ?', [$lid]);
+                    if (!$lbl || !empty($lbl['archived'])
+                        || ($lbl['project_id'] !== null && (int)$lbl['project_id'] !== (int)$task['project_id'])) {
+                        break;
+                    }
                     pm_exec('INSERT IGNORE INTO task_labels (task_id, label_id) VALUES (?,?)', [$taskId, $lid]);
                     break;
                 }

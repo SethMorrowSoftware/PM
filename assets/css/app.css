@@ -285,14 +285,17 @@ textarea:focus-visible,
   margin-left: auto; display: flex; align-items: center; gap: 8px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 6px 10px; width: min(320px, 44vw); min-width: 170px; transition: all 0.15s;
+  overflow: hidden;
 }
 .search:focus-within { border-color: var(--acc-border); background: var(--bg-3); box-shadow: 0 0 0 3px var(--acc-soft); }
-.search input { flex:1; background: none; border: 0; outline: none; font-size: 13px; color: var(--fg-0); }
+/* min-width:0 lets the input shrink with the box on narrow screens (its
+   intrinsic ~174px otherwise overflows under the topbar buttons). */
+.search input { flex:1; min-width: 0; background: none; border: 0; outline: none; font-size: 13px; color: var(--fg-0); }
 .search input::placeholder { color: var(--fg-3); }
 .search .kbd { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); background: var(--bg-3); border: 1px solid var(--line-2); padding: 1px 5px; border-radius: 4px; }
 .search:focus-within .kbd { display: none; }
 
-.icon-btn { width: 32px; height: 32px; border-radius: 7px; display: grid; place-items: center; color: var(--fg-2); position: relative; }
+.icon-btn { width: 32px; height: 32px; border-radius: 7px; display: grid; place-items: center; color: var(--fg-2); position: relative; flex-shrink: 0; }
 .icon-btn:hover { background: var(--bg-2); color: var(--fg-0); }
 .icon-btn .icon { width: 16px; height: 16px; }
 .icon-btn.sm { width: 22px; height: 22px; }
@@ -463,6 +466,15 @@ textarea:focus-visible,
   .drawer-body { padding: 14px 14px 22px; }
 }
 
+/* Dialogs built by ui.js modal() (confirm/prompt — class "modal dialog") can be
+   launched from inside the task drawer (z 72): lift the dialog and its own
+   scrim above it, or the drawer paints over the dialog's Save/Delete buttons.
+   Only the scrim modal() renders (the .dialog's previous sibling) is raised —
+   the bare .scrim stays at 70 so the drawer's own scrim keeps sitting UNDER
+   the drawer. Still below the mobile nav (85/90) and .popover (100). */
+.modal.dialog { z-index: 74; }
+.scrim:has(+ .modal.dialog) { z-index: 73; }
+
 /* ---------- Generic card (dashboard) ---------- */
 .card { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease); }
 .card:hover { border-color: var(--line-2); box-shadow: var(--shadow-2); transform: translateY(-1px); }
@@ -474,7 +486,7 @@ textarea:focus-visible,
 .list-wrap { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
 .list-header, .list-row {
   display: grid;
-  grid-template-columns: 26px 60px 1fr 140px 120px 110px 110px 80px 50px;
+  grid-template-columns: 64px 60px 1fr 140px 120px 110px 110px 80px 50px;
   padding: 10px 14px; align-items: center;
 }
 .list-header { border-bottom: 1px solid var(--line); font-size: 11px; color: var(--fg-3); letter-spacing: 0.06em; text-transform: uppercase; font-weight: 600; background: var(--bg-1); }
@@ -525,8 +537,11 @@ textarea:focus-visible,
 .checkbox svg { stroke: white; }
 
 /* ---------- Calendar ---------- */
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--bg-2); flex: 1; min-height: 0; }
-.cal-dow { padding: 10px 12px; font-size: 10.5px; color: var(--fg-3); font-weight: 600; letter-spacing: 0.06em; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+/* overflow-y:auto (not hidden): a 6-week month at 110px/cell overruns common
+   laptop heights and nothing else scrolls the grid — hidden made the last
+   week's chips unreachable. */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow-y: auto; overflow-x: hidden; background: var(--bg-2); flex: 1; min-height: 0; }
+.cal-dow { position: sticky; top: 0; z-index: 2; padding: 10px 12px; font-size: 10.5px; color: var(--fg-3); font-weight: 600; letter-spacing: 0.06em; border-bottom: 1px solid var(--line); background: var(--bg-1); }
 .cal-cell { min-height: 110px; padding: 6px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cal-cell:not(:nth-child(7n)):not(.last-row) { border-right: 1px solid var(--line); }
 .cal-cell.not-in-month { background: var(--bg-1); opacity: 0.55; }
@@ -720,12 +735,19 @@ textarea:focus-visible,
   font-family: var(--font-mono);
 }
 .notif-panel {
-  position: absolute; z-index: 100; top: calc(100% + 8px); right: 0;
   width: min(380px, calc(100vw - 24px)); max-height: min(70vh, 560px);
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg-2); border: 1px solid var(--line-2);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
   animation: scaleIn var(--dur) var(--ease); transform-origin: top right;
+}
+/* The panel is portalled inside openPopover's .popover shell — it must lay out
+   in-flow there (no self-positioning, or the shell renders as an empty pill
+   above it). Collapse the doubled chrome: -6px cancels the shell's padding so
+   the head divider and rows run edge to edge inside the shell's border. */
+.popover > .notif-panel {
+  margin: -6px; border: none; box-shadow: none;
+  border-radius: calc(var(--radius) - 1px); animation: none;
 }
 .notif-panel-head {
   display: flex; align-items: center; gap: var(--sp-2);
@@ -987,6 +1009,7 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   .topbar { padding: 0 12px; gap: 8px; }
   .crumbs { display: none; }
   .search { width: min(250px, 52vw); }
+  .search .kbd { display: none; } /* keyboard hint is meaningless on touch */
   .filters { padding: 10px 12px; gap: 8px; overflow-x: auto; }
   .mobile-nav-toggle { display: grid; flex-shrink: 0; }
   .mobile-nav-scrim { z-index: 85; border: 0; width: 100%; }
@@ -1040,7 +1063,9 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
 
   .list-row {
     display: grid;
-    grid-template-columns: 26px 1fr auto;
+    /* auto, not a fixed track: the check cell holds grip + select + done-toggle
+       (~54px) and the header that would need aligning is hidden here. */
+    grid-template-columns: auto 1fr auto;
     grid-template-areas:
       "check title title";
     gap: 2px var(--sp-2);
@@ -1107,6 +1132,18 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
     flex: 1 1 100%; white-space: normal; font-size: var(--fs-md);
     padding: var(--sp-2); border-radius: var(--radius-sm);
   }
+  /* Stack the unscheduled rail under the agenda instead of squeezing beside
+     it. !important beats the inline flex/border/padding from calendar.js
+     (precedent: the .tl-axis-cell override above). */
+  .cal-wrap { flex-direction: column; }
+  .cal-rail {
+    flex: 1 1 auto !important;
+    border-left: none !important;
+    padding-left: 0 !important;
+    border-top: 1px solid var(--line);
+    padding-top: var(--sp-3);
+  }
+  .cal-rail .cal-event { flex: 0 0 auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {

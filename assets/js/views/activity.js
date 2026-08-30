@@ -98,6 +98,7 @@ function renderActivity(tasks, handlers = {}) {
       },
       // Enter searches immediately rather than waiting out the debounce.
       onKeydown: (e) => {
+        if (imeGuard(e)) return;
         if (e.key === 'Enter') { clearTimeout(searchTimer); filters.q = e.target.value.trim(); reload(); }
       },
     }),

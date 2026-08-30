@@ -77,8 +77,10 @@ if ($form && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 pm_exec('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?,?)', [$tid, (int)$a]);
             }
             pm_exec('UPDATE intake_forms SET submissions = submissions + 1 WHERE id = ?', [(int)$form['id']]);
+            // Anonymous submission: no actor (user_id is nullable by design) —
+            // attributing it to the form's creator would falsify the audit log.
             pm_exec('INSERT INTO activity (user_id, task_id, action, detail) VALUES (?,?,?,?)',
-                [(int)($form['created_by'] ?: 0), $tid, 'intake',
+                [null, $tid, 'intake',
                  'Submitted by ' . $reporter . ' via form "' . $form['name'] . '"']);
             if (function_exists('pm_notify_users')) {
                 $targets = $assignees;

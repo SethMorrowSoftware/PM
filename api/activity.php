@@ -34,6 +34,23 @@ if (function_exists('pm_readable_project_ids')) {
         } else {
             $where[] = 'a.task_id IS NULL';
         }
+        // Task-less project rows (project_created/_archived/...) pass the
+        // filter above but carry the project NAME in detail. Redact the ones
+        // naming a private project the viewer can't read — activity rows have
+        // no project id column, so the match is by current name (best effort).
+        if (function_exists('pm_can_read_project')) {
+            $hiddenNames = [];
+            try {
+                foreach (pm_fetch_all("SELECT id, name FROM projects WHERE visibility = 'private'") as $pr) {
+                    if (!pm_can_read_project($viewerUid, (int)$pr['id'])) $hiddenNames[] = (string)$pr['name'];
+                }
+            } catch (Throwable $_) { /* visibility column absent on old installs */ }
+            if ($hiddenNames) {
+                $ph = implode(',', array_fill(0, count($hiddenNames), '?'));
+                $where[] = "NOT (a.task_id IS NULL AND a.action LIKE 'project\\_%' AND a.detail IN ($ph))";
+                foreach ($hiddenNames as $n) $params[] = $n;
+            }
+        }
     }
 }
 $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
@@ -64,8 +81,10 @@ pm_json([
         'created_at' => $r['created_at'],
         'user'       => [
             'id'       => $r['user_id'] !== null ? (int)$r['user_id'] : null,
-            'name'     => $r['user_name'] ?? 'Former teammate',
-            'initials' => $r['initials']  ?? '??',
+            // NULL user means a deleted teammate — except intake rows, which
+            // are created by anonymous public-form visitors.
+            'name'     => $r['user_name'] ?? ($r['action'] === 'intake' ? 'Visitor' : 'Former teammate'),
+            'initials' => $r['initials']  ?? ($r['action'] === 'intake' ? 'V' : '??'),
             'color'    => $r['color']     ?? '#64748B',
         ],
         'task' => $r['task_id'] ? [
