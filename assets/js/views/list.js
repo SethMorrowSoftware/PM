@@ -38,7 +38,9 @@ function renderList(tasks, handlers) {
     root.replaceChildren();
 
     // ---------- toolbar: grouping / sort / sort-dir / bulk bar ----------
-    const toolbar = h('div', { style: { display: 'flex', gap: '8px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' } },
+    // pm-hscroll: on a phone the group/sort segmented controls take a row each
+    // when wrapped, so they scroll horizontally as one strip instead.
+    const toolbar = h('div', { class: 'list-toolbar pm-hscroll', style: { display: 'flex', gap: '8px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' } },
       Segmented('Group by', ls.groupBy, v => { ls.groupBy = v; redraw(); },
         [['status', 'Status'], ['project', 'Project'], ['assignee', 'Assignee']]),
       Segmented('Sort', ls.sortBy, v => { ls.sortBy = v; redraw(); },
@@ -417,12 +419,13 @@ function ListRow(task, { onOpen, onToggleStatus, selected = false, onSelect, sav
       ? h('span', { class: 'row-grip', title: 'Drag to reorder',
           style: { display: 'inline-flex', color: 'var(--fg-4)', cursor: 'grab' },
           onClick: (e) => e.stopPropagation() }, Icon('grip', 13))
-      : h('span', { style: { display: 'inline-flex', width: '13px' } }),
+      : h('span', { class: 'row-grip-spacer', style: { display: 'inline-flex', width: '13px' } }),
     h('input', {
-      type: 'checkbox', checked: selected,
+      type: 'checkbox', checked: selected, class: 'row-select',
       // Read-only rows aren't selectable (bulk actions on them 403 server-side).
       disabled: !canWrite,
       'aria-label': 'Select task',
+      title: 'Select for bulk edit',
       onClick: e => e.stopPropagation(),
       onChange: canWrite ? (e => onSelect?.(!!e.target.checked, e)) : (e => e.preventDefault()),
     }),

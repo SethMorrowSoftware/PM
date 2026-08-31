@@ -186,7 +186,15 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin:0; padding:0; background: var(--bg-0); color: var(--fg-0); font-family: var(--font-sans); font-size: 14px; line-height: 1.4; -webkit-font-smoothing: antialiased; }
-body { min-height: 100vh; overflow: hidden; }
+body { min-height: 100vh; min-height: 100dvh; overflow: hidden; }
+/* App-shell scrolling: the document itself never scrolls (on any size), so the
+   chrome stays put and exactly one element owns each scroll axis. `overscroll-
+   behavior: none` on the root also suppresses the rubber-band / pull-to-refresh
+   that made the whole page feel loose on touch. */
+html { overscroll-behavior: none; }
+/* The grey flash Android paints over every tap reads as a rendering glitch on
+   a UI this dense; the components below all provide their own :active state. */
+* { -webkit-tap-highlight-color: transparent; }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
 input, textarea { font: inherit; color: inherit; }
 button:disabled,
@@ -207,7 +215,12 @@ textarea:focus-visible,
 ::-webkit-scrollbar-thumb:hover { background: var(--bg-5); background-clip: padding-box; border: 2px solid transparent; }
 
 /* ---------- LAYOUT ---------- */
-.app { display: grid; grid-template-columns: 248px 1fr; height: 100vh; width: 100vw; }
+/* dvh, not vh: on mobile browsers 100vh is the *large* viewport (as if the URL
+   bar were collapsed), so a vh-sized shell runs a toolbar's worth of height off
+   the bottom of the screen — which is what put the bottom nav and the last rows
+   of every list out of reach. dvh tracks the visible viewport; vh stays as the
+   fallback for browsers without it. */
+.app { display: grid; grid-template-columns: 248px 1fr; height: 100vh; height: 100dvh; width: 100%; overflow: hidden; }
 
 /* SIDEBAR */
 .sidebar { background: var(--bg-1); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
@@ -387,9 +400,23 @@ textarea:focus-visible,
 }
 .filter-pill:hover { background: var(--bg-3); border-style: solid; }
 .filter-pill .icon { width: 12px; height: 12px; }
+/* Each filter control carries both a short label ("Project") and its current
+   value ("All projects"). In the toolbar it shows one of them: the category
+   name while nothing is selected, the value once something is ("Labels" ->
+   "2 labels"). In the phone Filters sheet both show, value pushed right. */
+.filter-pill .fs-value { display: none; }
+.filter-pill.show-value .fs-label { display: none; }
+.filter-pill.show-value .fs-value { display: inline; }
+.filter-pill .fs-label, .filter-pill .fs-value { white-space: nowrap; }
+.filter-pill .fs-icon { flex-shrink: 0; }
 
-/* content area */
-.content { flex: 1; min-height: 0; overflow: auto; position: relative; }
+/* content area — the app's single vertical scroller. `contain` stops a flick
+   that reaches the end from chaining into the document (and, on iOS, into the
+   browser's own overscroll). */
+.content {
+  flex: 1; min-height: 0; overflow: auto; position: relative;
+  overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch;
+}
 
 /* ---------- TAGS / BADGES ---------- */
 .tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 5px; font-size: 11.5px; font-weight: 500; letter-spacing: 0.01em; }
@@ -416,11 +443,14 @@ textarea:focus-visible,
 .av-more { width: 22px; height: 22px; border-radius: 50%; background: var(--bg-4); color: var(--fg-1); display:grid; place-items:center; font-size: 10px; font-weight: 600; border: 2px solid var(--bg-3); margin-left: -6px; }
 
 /* ---------- POPOVER BASE ---------- */
+/* `fixed`, not `absolute`: openPopover() places it from getBoundingClientRect()
+   (viewport coordinates), which only matches an absolutely-positioned element
+   while the document scroll offset is 0. */
 .popover {
-  position: absolute; z-index: 100; background: var(--bg-2);
+  position: fixed; z-index: 100; background: var(--bg-2);
   border: 1px solid var(--line-2); border-radius: 10px;
   box-shadow: var(--shadow-pop); padding: 6px;
-  min-width: 220px;
+  min-width: 220px; overflow-y: auto; overscroll-behavior: contain;
   animation: scaleIn 0.12s ease-out; transform-origin: top left;
 }
 .popover-header { font-size: 11px; color: var(--fg-3); letter-spacing: 0.06em; text-transform: uppercase; padding: 8px 10px 6px; font-weight: 600; }
@@ -501,7 +531,7 @@ textarea:focus-visible,
 
 /* ---------- Kanban ---------- */
 .kb-board { display: flex; gap: 14px; padding: 20px; align-items: flex-start; min-height: 100%; overflow-x: auto; }
-.kb-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; max-height: calc(100vh - 180px); }
+.kb-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; max-height: calc(100vh - 180px); max-height: calc(100dvh - 180px); }
 .kb-col-head {
   padding: 10px 12px; display: flex; align-items: center; gap: 8px;
   background: var(--bg-2); border: 1px solid var(--line);
@@ -546,6 +576,9 @@ textarea:focus-visible,
 .cal-cell:not(:nth-child(7n)):not(.last-row) { border-right: 1px solid var(--line); }
 .cal-cell.not-in-month { background: var(--bg-1); opacity: 0.55; }
 .cal-daynum { font-size: 11.5px; font-weight: 600; width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; color: var(--fg-1); }
+/* Weekday abbreviation beside the date — only needed by the phone agenda; the
+   month grid's column headers already carry it. */
+.cal-daylabel { display: none; }
 .cal-daynum.today { background: var(--acc-0); color: white; }
 .cal-cell.not-in-month .cal-daynum { color: var(--fg-4); }
 .cal-event { font-size: 11px; padding: 3px 6px; border-radius: 4px; cursor: pointer; overflow: hidden; white-space: nowrap; font-weight: 500; display: flex; align-items: center; min-width: 0; min-height: 20px; flex-shrink: 0; transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
@@ -996,21 +1029,26 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
 .app.density-compact .notif-item { padding: var(--sp-2) var(--sp-3); }
 
 @media (max-width: 980px) {
-  body { overflow: auto; }
-  .app { grid-template-columns: 1fr; height: auto; min-height: 100vh; }
+  /* Keep the app-shell model on mobile too. The old layout let BOTH the
+     document and .content scroll, so a flick could move either one (or chain
+     between them) depending on where the finger landed — the single biggest
+     reason scrolling felt broken here. Now the shell is exactly one screen tall
+     and .content is the only vertical scroller. */
+  .app { grid-template-columns: 1fr; height: 100vh; height: 100dvh; }
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; width: min(84vw, 320px);
     z-index: 90; transform: translateX(-100%);
-    transition: transform 0.2s ease-out;
+    transition: transform 0.24s var(--ease);
     box-shadow: var(--shadow-pop);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    will-change: transform;
   }
   .app.mobile-nav-open .sidebar { transform: translateX(0); }
-  .main { min-height: 100vh; }
-  .topbar { padding: 0 12px; gap: 8px; }
+  .main { min-height: 0; }
+  .topbar { padding: 0 8px 0 4px; gap: 4px; }
   .crumbs { display: none; }
-  .search { width: min(250px, 52vw); }
   .search .kbd { display: none; } /* keyboard hint is meaningless on touch */
-  .filters { padding: 10px 12px; gap: 8px; overflow-x: auto; }
   .mobile-nav-toggle { display: grid; flex-shrink: 0; }
   .mobile-nav-scrim { z-index: 85; border: 0; width: 100%; }
 
@@ -1021,7 +1059,9 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
     flex-direction: row; overflow-x: auto; overflow-y: hidden;
     border-right: none; border-bottom: 1px solid var(--line);
     padding: 8px 10px; gap: 4px;
+    scrollbar-width: none;
   }
+  .settings-tabs::-webkit-scrollbar { display: none; }
   .settings-tab { white-space: nowrap; flex-shrink: 0; }
 }
 
@@ -1074,12 +1114,15 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
   }
   .list-row:hover { box-shadow: none; background: var(--bg-3); }
 
-  /* Secondary columns collapse out of the card on phones. */
+  /* Secondary columns collapse out of the card on phones. !important because
+     .col-progress carries an inline `display:flex` from list.js, which a plain
+     class rule loses to — it was leaving a stray progress bar stranded in the
+     checkbox gutter of every row. */
   .list-row .col-id,
   .list-row .col-labels,
   .list-row .col-assignees,
   .list-row .col-progress,
-  .list-row .col-actions { display: none; }
+  .list-row .col-actions { display: none !important; }
 
   /* Keep checkbox + title + a compact meta line (due / priority). */
   .list-row > .col-check,
@@ -1111,33 +1154,50 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
 
 /* ---------- MOBILE REFLOW: calendar -> single-column agenda ---------- */
 @media (max-width: 640px) {
+  /* The whole agenda flows into .content (the page scroller) rather than being
+     a fixed-height inner scroller. `height:100%` on the root came from the
+     desktop month grid, which needs to fill the viewport; an agenda doesn't,
+     and keeping it turned the grid into a shrink-to-fit flex container — which
+     squashed every day row to 25px while its 40px event kept its size and
+     painted over the next day. */
+  .cal-root { height: auto !important; padding: 16px 14px 24px !important; }
   .cal-grid {
     display: flex; flex-direction: column;
-    border-radius: var(--radius); overflow: hidden;
+    border-radius: var(--radius); overflow: visible;
+    flex: 0 0 auto; min-height: 0;
   }
   .cal-dow { display: none; }
   .cal-cell.not-in-month { display: none; }
   .cal-cell {
+    flex: 0 0 auto;              /* never shrink below the events inside */
     min-height: 0;
     flex-direction: row; align-items: flex-start; flex-wrap: wrap;
     gap: var(--sp-2); padding: var(--sp-3) var(--sp-4);
     border-right: none !important;
     border-top: 1px solid var(--line);
   }
-  .cal-cell:first-child { border-top: none; }
-  /* Empty agenda days take little room. */
-  .cal-cell:not(:has(.cal-event)) { padding: var(--sp-1) var(--sp-4); opacity: 0.7; }
+  .cal-cell:first-child, .cal-cell[data-empty="1"] + .cal-cell { border-top: none; }
+  /* The date sits in its own fixed-width gutter so every event lines up. */
+  .cal-dayhead { flex: 0 0 56px; margin-bottom: 0 !important; align-items: baseline !important; }
   .cal-daynum { flex: 0 0 auto; }
   .cal-event {
     flex: 1 1 100%; white-space: normal; font-size: var(--fs-md);
     padding: var(--sp-2); border-radius: var(--radius-sm);
+  }
+  /* Nothing at all this month: say so rather than showing an empty box. */
+  .cal-grid.cal-agenda-blank { border: none; }
+  .cal-grid.cal-agenda-blank::after {
+    content: 'Nothing scheduled this month.';
+    display: block; padding: 32px 16px; text-align: center;
+    color: var(--fg-3); font-size: var(--fs-md);
   }
   /* Stack the unscheduled rail under the agenda instead of squeezing beside
      it. !important beats the inline flex/border/padding from calendar.js
      (precedent: the .tl-axis-cell override above). */
   .cal-wrap { flex-direction: column; }
   .cal-rail {
-    flex: 1 1 auto !important;
+    flex: 0 0 auto !important;
+    overflow: visible !important;
     border-left: none !important;
     padding-left: 0 !important;
     border-top: 1px solid var(--line);
@@ -1162,24 +1222,36 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
     position: fixed;
     left: 0; right: 0; bottom: 0;
     z-index: 60;
-    background: var(--bg-1);
+    background: color-mix(in srgb, var(--bg-1) 88%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(14px);
+    backdrop-filter: saturate(180%) blur(14px);
     border-top: 1px solid var(--line);
-    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 4px 4px calc(4px + var(--safe-b));
     justify-content: space-around;
     align-items: stretch;
   }
   .mbn-item {
     flex: 1;
-    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
     background: none; border: 0; color: var(--fg-3);
-    font: inherit; font-size: 10.5px; font-weight: var(--fw-medium, 500);
-    padding: 4px 2px; cursor: pointer; border-radius: var(--radius-sm);
-    transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+    font: inherit; font-size: 10px; font-weight: var(--fw-medium, 500);
+    letter-spacing: 0.01em;
+    padding: 6px 2px; cursor: pointer; border-radius: var(--radius);
+    transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
   }
-  .mbn-item.active, .mbn-item.mbn-new { color: var(--acc-1); }
-  .mbn-item:active { background: var(--bg-3); }
+  .mbn-item .icon { transition: transform var(--dur) var(--ease); }
+  .mbn-item.active { color: var(--acc-1); }
+  .mbn-item.active .icon { transform: translateY(-1px); }
+  .mbn-item:active { background: var(--bg-3); transform: scale(0.94); }
+  /* The "New" action reads as the primary create affordance, not a peer tab. */
+  .mbn-item.mbn-new .icon {
+    background: var(--acc-0); color: #fff; border-radius: 999px;
+    width: 30px; height: 30px; padding: 5px;
+    box-shadow: 0 2px 8px rgba(59,130,246,0.35);
+  }
+  .mbn-item.mbn-new { color: var(--fg-2); }
   /* keep scrollable content clear of the fixed bar */
-  .content { padding-bottom: 76px; }
+  .content { padding-bottom: calc(var(--mbn-h) + var(--safe-b)); }
 }
 
 /* ----- Rendered Markdown (descriptions & comments) ----- */
@@ -1269,8 +1341,484 @@ body.dragging, body.dragging * { cursor: grabbing !important; user-select: none 
    nav taps never overlap) and span the width on phones. */
 @media (max-width: 980px) {
   .toast-host {
-    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--mbn-h) + 10px + var(--safe-b));
     left: 12px; right: 12px;
   }
   .toast { max-width: none; }
+}
+
+/* ==========================================================================
+   MOBILE UI/UX LAYER
+   --------------------------------------------------------------------------
+   Everything below is about making the phone experience a first-class one
+   rather than a squeezed desktop. Four themes run through it:
+
+     1. SCROLLING. One scroller per axis, `overscroll-behavior: contain` at
+        every boundary, and no `touch-action: none` on anything bigger than a
+        drag grip (see makeDraggable in ui.js).
+     2. CHROME BUDGET. The toolbar used to burn ~60% of a 844px screen before
+        the first task. It's now a single 52px strip plus a Filters sheet.
+     3. REACH & SIZE. 44px targets, 16px form text (anything smaller makes iOS
+        Safari zoom the page on focus), thumb-reachable sheets.
+     4. SAFE AREAS. Notch and home-indicator insets on every fixed edge.
+   ========================================================================== */
+
+:root {
+  --mbn-h: 60px;                           /* mobile bottom-nav height */
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+}
+
+/* ---------- 1. Scroll containment ---------- */
+/* Every inner scroller stops its momentum at its own edge instead of handing
+   the rest of the flick to whatever is behind it. */
+.drawer-body, .modal-body, .settings-body, .notif-panel-body,
+.kb-col-body, .cal-grid, .sidebar-scroll, .popover, .view-strip, .filters {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Horizontal strips (view tabs, filter row, board): scrollbars are noise on
+   touch, and the snap makes flicks land on a boundary rather than mid-item. */
+.pm-hscroll {
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  /* A soft fade at each end says "there's more this way" without a scrollbar.
+     The mask is inset by the scroll position so it disappears at either end. */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
+.pm-hscroll::-webkit-scrollbar { display: none; }
+/* Fine pointers get a real scrollbar back — a mouse has no flick gesture and
+   the fade alone doesn't tell you the track is draggable. */
+@media (pointer: fine) {
+  .pm-hscroll { -webkit-mask-image: none; mask-image: none; }
+}
+
+/* Long-press-to-drag targets: stop iOS raising the selection callout /
+   magnifier while the press is being held, and give a clear "picked up" cue. */
+.drag-source { -webkit-touch-callout: none; }
+.drag-source.drag-armed {
+  transform: scale(1.02);
+  box-shadow: var(--shadow-pop);
+  border-color: var(--acc-border);
+  transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+@media (pointer: coarse) {
+  /* Text selection inside a card only ever fights the long-press gesture. */
+  .kb-card, .cal-event, .tl-bar, .list-row { user-select: none; }
+}
+
+/* ---------- 2. Popover-as-sheet (phones) ---------- */
+/* A 220px panel anchored under a pill is a desktop idiom. On a phone the same
+   content docks to the bottom of the screen: full width, under the thumb, and
+   incapable of opening off-screen. */
+.pop-sheet-scrim {
+  position: fixed; inset: 0; z-index: 99;
+  background: rgba(0,0,0,0.45); animation: fadeIn 0.15s;
+}
+.popover.pop-sheet {
+  position: fixed; inset: auto 0 0 0;
+  width: 100%; min-width: 0; max-width: none;
+  max-height: min(72dvh, 560px);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-left: none; border-right: none; border-bottom: none;
+  padding: 8px 8px calc(8px + var(--safe-b));
+  animation: sheetUp 0.22s var(--ease);
+  transform-origin: bottom center;
+}
+/* Grab handle — the universal "this sheet dismisses downward" affordance. */
+.popover.pop-sheet::before {
+  content: ''; display: block; margin: 2px auto 8px;
+  width: 36px; height: 4px; border-radius: 999px; background: var(--line-2);
+}
+.popover.pop-sheet .pop-item { min-height: 48px; font-size: var(--fs-base); }
+.popover.pop-sheet .popover-header { font-size: var(--fs-sm); padding: 10px 12px 6px; }
+.popover.pop-sheet .pop-search input { font-size: 16px; padding: 11px 12px; }
+@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+/* ---------- 3. Form controls on touch ---------- */
+/* iOS Safari zooms the viewport whenever a focused field's text is under 16px,
+   and never zooms back out — the single most common way a mobile web app feels
+   broken. Everything typeable goes to 16px on coarse pointers; the visual
+   weight is held back with padding rather than font-size. */
+@media (pointer: coarse) {
+  input, textarea, select,
+  .input, .mention-input,
+  .search input, .pop-search input,
+  .settings-form input, .settings-form select, .settings-form textarea,
+  .cf-field input, .cf-field select, .cf-field textarea,
+  .modal-title-input { font-size: 16px !important; }
+
+  /* Keep the touch targets honest (WCAG 2.5.8 is 24px; 44px is the platform
+     convention and what the rest of this file already aims at). */
+  .nav-item, .nav-proj, .settings-tab, .list-group-head { min-height: 44px; }
+  .toggle-switch { width: 44px; height: 26px; }
+  .toggle-switch::after { width: 22px; height: 22px; }
+  .toggle-switch.on::after { transform: translateX(18px); }
+  .checkbox { width: 22px !important; height: 22px !important; }
+  input[type=checkbox] { width: 20px; height: 20px; }
+  .btn { padding: 8px 14px; }
+}
+/* Native checkboxes ship a browser-blue tick that clashes with the palette in
+   both themes; accent-color puts them on the app's own accent. */
+input[type=checkbox], input[type=radio] { accent-color: var(--acc-0); }
+
+/* ==========================================================================
+   PHONE + SMALL TABLET  (<= 980px)
+   ========================================================================== */
+@media (max-width: 980px) {
+
+  /* ---------- Top bar ---------- */
+  /* Pinned by the shell (it's a flex sibling of the single scroller), tinted
+     and blurred so content scrolling under it stays legible, and extended into
+     the notch inset so a PWA doesn't render behind the status bar. */
+  .topbar {
+    height: calc(52px + var(--safe-t));
+    padding-top: var(--safe-t);
+    padding-left: calc(4px + env(safe-area-inset-left, 0px));
+    padding-right: calc(8px + env(safe-area-inset-right, 0px));
+    background: color-mix(in srgb, var(--bg-0) 86%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(14px);
+    backdrop-filter: saturate(180%) blur(14px);
+    z-index: 30;
+  }
+  /* Current view name, shown in place of the desktop breadcrumb trail. */
+  .topbar-title {
+    font-size: 15px; font-weight: var(--fw-semibold); letter-spacing: -0.01em;
+    color: var(--fg-0); min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; margin-right: auto;
+  }
+  .topbar-title .topbar-title-sub {
+    display: block; font-size: 11px; font-weight: var(--fw-normal);
+    color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Search collapses to an icon in the bar and expands into its own full-width
+     row beneath it, so it stops competing with five other controls for 390px. */
+  .topbar-search-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+    background: var(--bg-0); flex-shrink: 0;
+  }
+  .topbar-search-row .search { margin-left: 0; flex: 1; width: auto; min-width: 0; max-width: none; }
+
+  /* ---------- Filter / view toolbar ---------- */
+  /* Was up to four wrapped rows (~390px of a 844px screen). Now one 52px strip:
+     a scroll-snapped view-tab rail plus a single Filters button whose badge
+     carries the active count. Everything it replaced lives in the sheet. */
+  .filters {
+    padding: 6px 8px; gap: 8px;
+    align-items: center;
+    padding-left: calc(8px + env(safe-area-inset-left, 0px));
+    padding-right: calc(8px + env(safe-area-inset-right, 0px));
+    overflow: visible;
+  }
+  /* Tablet and landscape-phone widths keep the desktop filter pills, so the tab
+     rail takes a row of its own — sharing one line with six pills squeezed it
+     to a sliver. Phones (below) put the pills in a sheet and share the row. */
+  .view-strip {
+    flex: 1 1 100%; min-width: 0;
+    scroll-snap-type: x proximity;
+  }
+  .view-strip .view-tabs {
+    border: none; background: none; padding: 0; gap: 4px;
+    width: max-content; min-width: 100%; overflow: visible;
+  }
+  .view-tab {
+    scroll-snap-align: center; flex-shrink: 0;
+    border-radius: 999px; padding: 8px 12px;
+    background: var(--bg-2); border: 1px solid var(--line);
+    color: var(--fg-2);
+  }
+  .view-tab .icon { width: 15px; height: 15px; }
+  .view-tab.active {
+    background: var(--acc-soft); color: var(--acc-1);
+    border-color: var(--acc-border); box-shadow: none;
+  }
+  /* Labels are what make a pill rail scannable; the desktop rule at 1024px
+     hides them for a cramped icon strip, which is worse on a phone, not better. */
+  .view-strip .view-tab-label { display: inline; font-size: 12.5px; }
+
+  .filters-trigger {
+    flex-shrink: 0; position: relative;
+    border-style: solid; padding: 8px 12px; border-radius: 999px;
+  }
+  .filters-trigger .filters-count {
+    min-width: 17px; height: 17px; padding: 0 5px; border-radius: 999px;
+    background: var(--acc-0); color: #fff; font-size: 10.5px;
+    font-weight: var(--fw-bold); line-height: 17px; text-align: center;
+    font-family: var(--font-mono);
+  }
+  .filters-trigger.active { background: var(--acc-soft); border-color: var(--acc-border); color: var(--acc-1); }
+
+  /* Rows inside the Filters sheet: full-width, label left, current value right. */
+  .filter-sheet { display: flex; flex-direction: column; }
+  .filter-sheet-row {
+    display: flex !important; align-items: center; gap: 12px; width: 100%;
+    padding: 13px 4px !important; min-height: 52px;
+    border: none; border-bottom: 1px solid var(--line);
+    border-radius: 0; background: none !important;
+    font-size: var(--fs-base) !important; color: var(--fg-1); text-align: left;
+  }
+  .filter-sheet-row:last-of-type { border-bottom: none; }
+  .filter-sheet-row .fs-icon { color: var(--fg-3); width: 17px; height: 17px; flex-shrink: 0; }
+  /* Both halves show here, whatever the toolbar chose to display. */
+  .filter-sheet-row .fs-label { display: block !important; flex-shrink: 0; color: var(--fg-1); }
+  .filter-sheet-row .fs-value {
+    display: block !important;
+    margin-left: auto; color: var(--fg-3); min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .filter-sheet-row .fs-chev { color: var(--fg-4); flex-shrink: 0; transform: rotate(-90deg); }
+  .filter-sheet-row.is-set .fs-icon { color: var(--acc-1); }
+  .filter-sheet-row.is-set .fs-value { color: var(--acc-1); font-weight: var(--fw-medium); }
+  .filter-sheet-row:active { background: var(--bg-3) !important; }
+  .filter-sheet-foot {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding-top: 14px; margin-top: 10px; border-top: 1px solid var(--line);
+  }
+  .filter-sheet-foot .filters-utilities { margin-left: 0 !important; gap: 8px; }
+  .filter-sheet-foot .btn { min-height: 40px; }
+  /* The sheet prints the visible-task count itself, on the left. */
+  .filter-sheet-foot .filters-count-label { display: none; }
+  /* "Completed tasks" is a toggle, not a drill-in — no chevron, and the value
+     carries the on/off state. */
+  .filter-sheet-row[aria-pressed] .fs-chev { display: none; }
+  .filter-sheet-row[aria-pressed="true"] .fs-value { color: var(--acc-1); }
+
+  /* ---------- Sidebar (slide-over) ---------- */
+  .sidebar-scroll { padding-bottom: 16px; }
+  .sidebar-footer { padding-bottom: calc(10px + var(--safe-b)); }
+  .nav-item, .nav-proj { padding: 10px 12px; font-size: 14px; }
+  .nav-item .icon { width: 18px; height: 18px; }
+  .brand { padding: 16px 16px 12px; }
+  .mobile-nav-scrim { background: rgba(0,0,0,0.5); }
+
+  /* ---------- Modals become bottom sheets ---------- */
+  /* A centred box that starts 18% down the screen is the wrong shape on a
+     phone: the primary action lands mid-screen and the software keyboard
+     covers it. Docked to the bottom, the action stays under the thumb and
+     above the keyboard. */
+  .modal {
+    top: auto; bottom: 0; left: 0; right: 0;
+    transform: none; width: 100%; max-width: 100%;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    border-left: none; border-right: none; border-bottom: none;
+    max-height: 92dvh;
+    animation: sheetUp 0.22s var(--ease);
+  }
+  .modal::before {
+    content: ''; display: block; margin: 8px auto 0;
+    width: 36px; height: 4px; border-radius: 999px; background: var(--line-2);
+    flex-shrink: 0;
+  }
+  .modal-head { padding: 12px 16px 10px; }
+  .modal-body { padding: 12px 16px; }
+  .modal-foot {
+    padding: 12px 16px calc(12px + var(--safe-b));
+    gap: 8px;
+  }
+  /* Stacked, full-width actions read better than a cramped right-aligned row. */
+  .modal-foot { justify-content: stretch; }
+  .modal-foot .hstack { width: 100%; margin-left: 0 !important; }
+  .modal-foot > .btn, .modal-foot .hstack .btn {
+    flex: 1; justify-content: center; min-height: 46px; margin-left: 0 !important;
+  }
+  .modal-foot .hint { display: none; }
+
+  /* ---------- Settings: full screen ---------- */
+  .settings-modal {
+    top: 0; left: 0; right: 0; bottom: 0;
+    transform: none; width: 100%; max-width: 100%;
+    height: 100dvh; border-radius: 0; border: none;
+  }
+  .settings-head { padding: calc(12px + var(--safe-t)) 14px 12px; }
+  .settings-body { padding: 16px 14px calc(24px + var(--safe-b)); }
+  .settings-form { grid-template-columns: 1fr; padding: 12px; }
+  .settings-form .check-grid { grid-template-columns: 1fr; }
+  /* Name on its own line, actions beneath it. Sharing one line squeezed long
+     project names into a three-line column beside three buttons. */
+  .settings-row { flex-wrap: wrap; gap: 8px 12px; }
+  .settings-row .row-main { flex: 1 1 100%; }
+  .settings-row .row-actions { margin-left: auto; flex-wrap: wrap; gap: 6px; }
+  .settings-row .row-actions .btn { min-height: 38px; }
+  .settings-section-head { flex-direction: column; gap: 8px; }
+
+  /* ---------- Task drawer: full-screen sheet ---------- */
+  .drawer {
+    width: 100%; max-width: 100%;
+    padding-top: var(--safe-t);
+    animation: sheetUp 0.24s var(--ease);
+  }
+  /* The header must survive scrolling — Close and Delete were only reachable by
+     scrolling a 1900px drawer back to the top. */
+  .drawer-head {
+    position: sticky; top: 0; z-index: 5;
+    background: color-mix(in srgb, var(--bg-2) 92%, transparent);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+    padding: 10px 8px 10px 12px; gap: 6px;
+  }
+  /* Long project names were wrapping the header to three lines and pushing the
+     action row off the top of the screen. The project name is the one part
+     that may be clipped — the task ref is the task's identity, so it holds. */
+  .drawer-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; }
+  .drawer-head > span.mono, .drawer-head > span.chip { flex-shrink: 0; }
+  .drawer-head .hstack { gap: 0; flex-shrink: 0; }
+  .drawer-body { padding: 14px 16px calc(28px + var(--safe-b)); }
+
+  /* The topbar's controls should read as one row of peers — the theme toggle
+     was the only one carrying a filled, bordered button treatment. */
+  .topbar .theme-toggle {
+    background: none; border-color: transparent; padding: 0;
+    width: 40px; height: 40px; justify-content: center;
+  }
+
+  /* ---------- Notification panel ---------- */
+  .popover > .notif-panel { max-height: min(66dvh, 520px); }
+  .notif-item { padding: 14px var(--sp-4); }
+
+  /* ---------- Content padding ---------- */
+  .checklist-wrap { padding: 16px 14px calc(40px + var(--mbn-h)); }
+  .filter-blank-note { margin: 12px 14px 0; }
+}
+
+/* ==========================================================================
+   PHONE  (<= 640px) — per-view reflow
+   ========================================================================== */
+@media (max-width: 640px) {
+
+  /* One toolbar row: the tab rail shares it with the Filters button, because
+     every other control has moved into that button's sheet. */
+  .filters { flex-wrap: nowrap; }
+  .view-strip { flex: 1 1 auto; }
+
+  /* ---------- Kanban: full-width snapping columns ---------- */
+  /* 300px columns on a 390px screen meant the first (often empty) column ate
+     the whole screen and the rest were half-visible. Now one column fills the
+     view with the next peeking, the board snaps between them, and the column
+     body is the only vertical scroller. */
+  .kb-board {
+    padding: 12px 0 12px 14px;
+    gap: 12px; height: 100%; align-items: stretch;
+    scroll-snap-type: x mandatory;
+    scroll-padding-left: 14px;
+    overscroll-behavior-x: contain;
+  }
+  .kb-board::after { content: ''; flex: 0 0 14px; } /* trailing gutter */
+  .kb-col {
+    width: calc(100vw - 46px);   /* leaves a peek of the next column */
+    max-width: 420px;
+    max-height: none; height: 100%;
+    scroll-snap-align: start;
+  }
+  .kb-col-head { padding: 12px; border-radius: var(--radius) var(--radius) 0 0; }
+  .kb-col-body {
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: 10px; gap: 10px;
+    overscroll-behavior-y: contain;
+  }
+  .kb-card { padding: 12px; border-radius: var(--radius); }
+  .kb-card:active { border-color: var(--acc-border); }
+
+  /* ---------- List: cards, not a crushed table ---------- */
+  .list-toolbar {
+    flex-wrap: nowrap !important;
+    margin: 0 0 12px !important;
+    padding-bottom: 2px;
+  }
+  .list-toolbar > * { flex-shrink: 0; }
+  .segmented { flex-shrink: 0; }
+  /* The check cell held a dead 13px grip spacer plus two similar-looking
+     squares. Drop the spacer (the grip only exists in Manual sort anyway) and
+     space the two checkboxes so the select box and the done toggle read as
+     different controls. */
+  .list-row .row-grip-spacer { display: none; }
+  .list-row .col-check { gap: 12px !important; }
+  /* Round for "complete this task", square for "select this row" — side by side
+     at touch size, two identical squares read as a rendering bug. */
+  .list-row .checkbox { border-radius: 50%; }
+  .list-row { padding: 12px 14px; gap: 4px var(--sp-2); }
+  .list-row .col-title { font-weight: var(--fw-medium); line-height: 1.35; }
+  /* The title had `white-space: nowrap` from the desktop table, so every row
+     showed one truncated line. Two lines fit the width far better. */
+  .list-row .col-title > * {
+    white-space: normal !important; overflow: visible !important;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden !important;
+  }
+  .list-row > .col-due,
+  .list-row > .col-priority,
+  .list-row > .col-status { margin-top: 2px; }
+  .list-group-head { padding: 12px 14px; position: sticky; top: 0; z-index: 2; }
+
+  /* ---------- Calendar: a real agenda ---------- */
+  /* The month grid reflowed to one row per day INCLUDING empty ones, so the
+     August view opened on 24 blank rows before the first task. Empty days are
+     dropped outright (calendar.js marks them), leaving a dense agenda. */
+  .cal-cell[data-empty="1"] { display: none; }
+  .cal-cell.is-today { background: var(--acc-soft); }
+  /* Weekday sits next to the date number in the left gutter. */
+  .cal-daylabel {
+    display: block; font-size: var(--fs-xs);
+    color: var(--fg-3); font-weight: var(--fw-semibold);
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .cal-cell.is-today .cal-daylabel { color: var(--acc-1); }
+  /* Multi-day segments compute a `calc(N*100% + …)` width for the 7-column
+     grid; in the one-per-row agenda that overflowed and painted over the
+     neighbouring day number. */
+  .cal-cell .cal-event { width: auto !important; max-width: 100% !important; }
+  .cal-event { padding: var(--sp-2) var(--sp-3); min-height: 40px; }
+  .cal-head { flex-wrap: wrap; }
+
+  /* ---------- Timeline ---------- */
+  .tl-row { grid-template-columns: 108px 1fr; }
+  .tl-axis > .tl-axis-cell:first-child { flex: 0 0 108px !important; }
+  .tl-row .tl-label { font-size: var(--fs-sm); }
+  .tl-bar { height: 26px; }
+
+  /* ---------- Dashboard greeting ---------- */
+  /* The greeting is a space-between row, so on a phone the two action buttons
+     squeezed the text to half the width — "Good day, Seth." broke over three
+     lines and the date over three more. Stack it, then the copy gets the full
+     width and fits on one line each. */
+  .dash-greeting {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+  }
+  .dash-greeting h1 { font-size: clamp(19px, 5.6vw, 26px) !important; line-height: 1.15; }
+  .dash-greeting > .hstack { justify-content: flex-start; }
+  .dash-greeting > .hstack .btn { flex: 1; justify-content: center; white-space: nowrap; }
+  .dash-grid > .dash-stats { gap: var(--sp-3); }
+  .card-head { padding: 12px 14px 8px; }
+  .card-head > div:last-child { flex-shrink: 0; }
+
+  /* "Your focus" rows: title and project get the full width, the trailing meta
+     wraps beneath them aligned under the title. */
+  .focus-row { flex-wrap: wrap; align-items: flex-start !important; gap: 8px 10px !important; }
+  .focus-row .focus-main { flex: 1 1 auto; }
+  .focus-row .focus-meta { flex: 1 0 100%; padding-left: 24px; flex-wrap: wrap; }
+
+  /* ---------- Workload / goals / activity ---------- */
+  .wl-row, .goal-row { flex-wrap: wrap; }
+}
+
+/* Very narrow phones (<=360px): drop the tab text so the rail still fits a
+   few tabs per screen, and tighten the board gutter. */
+@media (max-width: 360px) {
+  .view-strip .view-tab-label { display: none; }
+  .view-tab { padding: 8px 10px; }
+  .kb-col { width: calc(100vw - 38px); }
+}
+
+/* Landscape phones are short, not narrow: give the vertical space back. */
+@media (max-width: 980px) and (max-height: 480px) and (orientation: landscape) {
+  .topbar { height: calc(44px + var(--safe-t)); }
+  .filters { padding-top: 4px; padding-bottom: 4px; }
+  .mobile-bottom-nav { display: none; }
+  .content { padding-bottom: var(--safe-b); }
+  .modal { max-height: 96dvh; }
 }

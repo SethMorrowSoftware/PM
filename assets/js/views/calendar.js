@@ -18,7 +18,7 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
     redraw();
   }
 
-  const root = h('div', { style: { padding: '20px', height: '100%', display: 'flex', flexDirection: 'column' } });
+  const root = h('div', { class: 'cal-root', style: { padding: '20px', height: '100%', display: 'flex', flexDirection: 'column' } });
   const cleanups = [];
   function teardown() { while (cleanups.length) { try { cleanups.pop()(); } catch (_) {} } }
 
@@ -117,7 +117,7 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
     const dow = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 
     // ---- Header ----
-    root.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' } },
+    root.appendChild(h('div', { class: 'cal-head', style: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '14px' } },
       h('h2', { style: { margin: 0, fontSize: '18px', fontWeight: '600', letterSpacing: '-0.02em' } }, monthName),
       h('div', { class: 'hstack', style: { gap: '2px' } },
         h('button', { class: 'icon-btn', 'aria-label': 'Previous month',
@@ -213,8 +213,12 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         onAddTask?.('todo', { due: iso });
       });
 
-      cell.appendChild(h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' } },
+      if (isToday) cell.classList.add('is-today');
+      cell.appendChild(h('div', { class: 'cal-dayhead', style: { display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' } },
         h('span', { class: 'cal-daynum' + (isToday ? ' today' : '') }, String(c.date.getDate())),
+        // Weekday abbreviation: only rendered on the phone agenda (CSS hides it
+        // in the month grid, where the column header already says the day).
+        h('span', { class: 'cal-daylabel' }, dow[c.date.getDay()]),
       ));
 
       for (const t of dayTasks.slice(0, 3)) cell.appendChild(renderEvent(t));
@@ -244,6 +248,22 @@ function renderCalendar(tasks, { onOpenTask, onMoveTaskDate, onAddTask }) {
         cell.appendChild(more);
       }
       grid.appendChild(cell);
+    });
+
+    // The phone agenda (CSS reflows the 7-column grid to one row per day) has
+    // to drop days with nothing on them, or a quiet month opens on two dozen
+    // blank rows before the first task. Marked here rather than with :has() so
+    // multi-day spans — appended below, after this pass — still count, and so
+    // today survives even when empty. Desktop ignores the attribute.
+    requestAnimationFrame(() => {
+      let shown = 0;
+      for (const iso in cellByIso) {
+        const cell = cellByIso[iso];
+        const empty = !cell.querySelector('.cal-event') && iso !== todayISO;
+        if (empty) cell.setAttribute('data-empty', '1');
+        else shown++;
+      }
+      grid.classList.toggle('cal-agenda-blank', shown === 0);
     });
 
     // ---- Spanning bars: place one segment in the start-of-week cell of each row

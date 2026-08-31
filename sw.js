@@ -6,7 +6,7 @@
  *   - static assets (css/js/svg/fonts): stale-while-revalidate.
  * Bump CACHE to force a clean sweep on a deploy.
  */
-const CACHE = 'ctt-cache-v3';
+const CACHE = 'ctt-cache-v4';
 const SHELL = ['index.html', 'manifest.json', 'assets/icon.svg', 'assets/favicon.svg'];
 
 self.addEventListener('install', (e) => {

@@ -207,32 +207,79 @@ function Checkbox(checked, size = 16) {
   return el;
 }
 
+// -------- Device helpers --------
+// Small, cheap predicates the UI uses to adapt at build time. They're read on
+// every render (renderApp() rebuilds the tree), and app.js re-renders when the
+// phone breakpoint is crossed, so a rotate/resize picks up the new answer.
+function pmCoarsePointer() {
+  return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+}
+function pmIsPhone() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 640px)').matches);
+}
+function pmIsMobile() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 980px)').matches);
+}
+
 // -------- Popover (portal to document.body) --------
 // Opens under `anchor`, closes on outside click or Escape.
+//
+// Positioning is `fixed`, not `absolute`: getBoundingClientRect() is in
+// viewport coordinates, so an absolutely-positioned panel drifts by the page
+// scroll offset the moment the document itself can scroll. It's clamped on
+// both axes and flips above the anchor when there's no room below, so a picker
+// opened near the bottom of a phone screen stays reachable.
+//
+// On phones the panel instead docks to the bottom of the screen as a sheet:
+// full width, under the thumb, and impossible to clip.
 let _popoverCounter = 0;
 function openPopover(anchor, buildContent, { offset = 6, align = 'start' } = {}) {
   const id = ++_popoverCounter;
-  const pop = h('div', { class: 'popover', dataset: { popid: String(id) } });
+  const sheet = pmIsPhone();
+  const pop = h('div', { class: 'popover' + (sheet ? ' pop-sheet' : ''), dataset: { popid: String(id) } });
   const content = buildContent({ close: () => closeMe() });
   appendChildren(pop, [content]);
+
+  // A sheet reads as modal, so it gets its own scrim to tap away on.
+  const scrim = sheet ? h('div', { class: 'pop-sheet-scrim' }) : null;
+  if (scrim) {
+    scrim.addEventListener('pointerdown', () => closeMe());
+    document.body.appendChild(scrim);
+  }
   document.body.appendChild(pop);
 
-  const r = anchor.getBoundingClientRect();
-  const left = align === 'end' ? r.right - pop.offsetWidth : r.left;
-  // clamp to viewport
-  const maxLeft = window.innerWidth - pop.offsetWidth - 8;
-  pop.style.top = (r.bottom + offset) + 'px';
-  pop.style.left = Math.max(8, Math.min(left, maxLeft)) + 'px';
+  function place() {
+    if (sheet) return; // CSS docks the sheet; nothing to compute.
+    const r = anchor.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    // Cap the height first so a long list measures at its final size.
+    pop.style.maxHeight = Math.max(180, vh - 16) + 'px';
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let left = align === 'end' ? r.right - pw : r.left;
+    left = Math.max(8, Math.min(left, vw - pw - 8));
+    let top = r.bottom + offset;
+    if (top + ph > vh - 8) {
+      const above = r.top - offset - ph;      // flip above the anchor
+      top = above >= 8 ? above : Math.max(8, vh - ph - 8);
+    }
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+  }
+  place();
 
   function onDown(e) {
     if (!pop.contains(e.target) && !anchor.contains(e.target)) closeMe();
   }
   function onKey(e) { if (e.key === 'Escape') closeMe(); }
   function closeMe() {
-    document.removeEventListener('mousedown', onDown, true);
+    document.removeEventListener('pointerdown', onDown, true);
     document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', place);
+    if (scrim) scrim.remove();
     pop.remove();
   }
+  window.addEventListener('resize', place);
 
   // Keyboard: roving focus over .pop-item options so pickers (status, priority,
   // assignee, label, project, milestone) are fully operable without a mouse.
@@ -251,15 +298,20 @@ function openPopover(anchor, buildContent, { offset = 6, align = 'start' } = {})
   });
 
   // Defer so the click that opened it doesn't immediately close it.
-  setTimeout(() => document.addEventListener('mousedown', onDown, true), 0);
+  // pointerdown (not mousedown) so a touch closes it on contact rather than
+  // waiting for the browser's synthesised mouse event.
+  setTimeout(() => document.addEventListener('pointerdown', onDown, true), 0);
   document.addEventListener('keydown', onKey);
   // HTML `autofocus` only runs on initial page load; inputs added dynamically
   // need an explicit .focus() once they're in the DOM. With no input (e.g. the
   // status/priority pickers), focus the first option so arrow keys work at once.
+  // On touch we deliberately DON'T focus the search field: the on-screen
+  // keyboard would spring up and cover the very list the user came to pick from.
   setTimeout(() => {
     const input = pop.querySelector('input, textarea');
-    if (input) input.focus();
-    else focusItem(0);
+    if (input && !pmCoarsePointer()) input.focus();
+    else if (!input) focusItem(0);
+    place();
   }, 0);
   return { close: closeMe, el: pop };
 }
@@ -560,14 +612,21 @@ function modal({ title = '', body = null, footer = null, width = null } = {}) {
     }
   }
 
-  scrim.addEventListener('mousedown', close);
+  // pointerdown so a tap on the scrim dismisses on contact instead of waiting
+  // for the browser's synthesised mouse event.
+  scrim.addEventListener('pointerdown', close);
   document.addEventListener('keydown', onKey, true);
   document.body.appendChild(frag);
 
-  // Focus the first focusable atom (fall back to the dialog itself).
+  // Focus the first focusable atom (fall back to the dialog itself). On touch,
+  // skip straight to the dialog when the first stop is a text field — focusing
+  // it would throw up the on-screen keyboard over the dialog before the user
+  // has even read it.
   setTimeout(() => {
     const items = focusables();
-    (items[0] || dialog).focus();
+    const first = items[0];
+    const isField = first && /^(INPUT|TEXTAREA|SELECT)$/.test(first.tagName);
+    ((isField && pmCoarsePointer()) ? dialog : (first || dialog)).focus();
   }, 0);
 
   return { el: dialog, close };
@@ -801,19 +860,63 @@ function mentionTextarea({ value = '', onInput, onSubmit, placeholder = '', rows
 // document.body gets the 'dragging' class. Callbacks receive the pointer
 // event (which carries clientX/clientY); `data` is attached to each event as
 // `e.dragData` for convenience.
-function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null, threshold = 5 } = {}) {
+//
+// TOUCH BEHAVIOUR — this is the part that makes or breaks mobile. Blanket
+// `touch-action:none` on a whole card hands the browser's scroll gesture to us
+// for every finger that lands on it, which is why the board and the calendar
+// used to be almost impossible to scroll on a phone. Instead:
+//   * With an explicit `handle` (a grip), only that grip opts out of native
+//     scrolling and drags start immediately — the rest of the row still scrolls.
+//   * With no handle the element itself is the drag target, so on touch we
+//     require a long press (`touchDelay`) held still before the drag arms. A
+//     finger that moves first just scrolls, exactly as the user expects; once
+//     armed we preventDefault() the touchmove and take the gesture over.
+// Mouse and pen keep the original immediate-drag behaviour.
+function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null, threshold = 5, touchDelay = 300 } = {}) {
   const grip = handle ? (typeof handle === 'string' ? el.querySelector(handle) : handle) : el;
   if (!grip) return () => {};
+  const hasHandle = grip !== el;
 
-  let startX = 0, startY = 0, active = false, started = false, pointerId = null;
+  let startX = 0, startY = 0, active = false, started = false, armed = false;
+  let pointerId = null, isTouch = false, pressTimer = null;
 
   function decorate(e) { try { e.dragData = data; } catch (_) {} return e; }
+
+  // Non-passive so preventDefault() actually suppresses the scroll once the
+  // long press has armed the drag. Bound per-gesture, released on end.
+  function onTouchMove(e) { if (armed) e.preventDefault(); }
+  function blockContextMenu(e) { if (armed) e.preventDefault(); }
+
+  function arm() {
+    if (!active || armed) return;
+    armed = true;
+    grip.classList.add('drag-armed');
+    // A short buzz is the standard "you've picked it up" cue on touch.
+    try { navigator.vibrate && navigator.vibrate(12); } catch (_) {}
+  }
+
+  function disarm() {
+    clearTimeout(pressTimer); pressTimer = null;
+    armed = false;
+    grip.classList.remove('drag-armed');
+    el.removeEventListener('touchmove', onTouchMove, { passive: false });
+    el.removeEventListener('contextmenu', blockContextMenu);
+  }
 
   function onPointerDown(e) {
     // Primary button / touch / pen only; ignore right-click.
     if (e.button != null && e.button !== 0) return;
     active = true; started = false; pointerId = e.pointerId;
+    isTouch = e.pointerType === 'touch';
     startX = e.clientX; startY = e.clientY;
+    // Mouse/pen, or a dedicated grip: armed at once. A bare touch on the card
+    // itself has to earn it with a long press so scrolling stays native.
+    armed = !isTouch || hasHandle;
+    if (isTouch && !hasHandle) {
+      el.addEventListener('touchmove', onTouchMove, { passive: false });
+      el.addEventListener('contextmenu', blockContextMenu);
+      pressTimer = setTimeout(arm, touchDelay);
+    }
     document.addEventListener('pointermove', onPointerMove, true);
     document.addEventListener('pointerup', onPointerUp, true);
     document.addEventListener('pointercancel', onPointerUp, true);
@@ -821,15 +924,22 @@ function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null
 
   function onPointerMove(e) {
     if (!active || (pointerId != null && e.pointerId !== pointerId)) return;
+    const dx = Math.abs(e.clientX - startX), dy = Math.abs(e.clientY - startY);
+    if (!armed) {
+      // Still waiting on the long press, and the finger moved — the user is
+      // scrolling. Stand down completely and let the browser have the gesture.
+      if (dx > threshold || dy > threshold) { abort(); }
+      return;
+    }
     if (!started) {
-      if (Math.abs(e.clientX - startX) < threshold && Math.abs(e.clientY - startY) < threshold) return;
+      if (dx < threshold && dy < threshold) return;
       started = true;
       document.body.classList.add('dragging');
       // Capture so we keep getting moves even over other elements.
       try { grip.setPointerCapture(pointerId); } catch (_) {}
       if (typeof onStart === 'function') onStart(decorate(e));
     }
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     if (typeof onMove === 'function') onMove(decorate(e));
   }
 
@@ -841,6 +951,14 @@ function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null
       try { grip.releasePointerCapture(pointerId); } catch (_) {}
       if (typeof onDrop === 'function') onDrop(decorate(e));
     }
+    disarm();
+    active = false; started = false; pointerId = null;
+  }
+
+  // Give up on this gesture without firing onDrop (the user is scrolling).
+  function abort() {
+    cleanupMove();
+    disarm();
     active = false; started = false; pointerId = null;
   }
 
@@ -851,11 +969,19 @@ function makeDraggable(el, { onStart, onMove, onDrop, handle = null, data = null
   }
 
   grip.addEventListener('pointerdown', onPointerDown);
-  grip.style.touchAction = 'none'; // prevent scroll-stealing on touch while dragging
+  // Only a dedicated grip claims the gesture up front. A whole card keeps
+  // `manipulation`: the browser may pan it on BOTH axes (the timeline scrolls
+  // horizontally, so pinning it to pan-y would trap that gesture) while still
+  // dropping the legacy double-tap-zoom delay. Once the long press arms, the
+  // non-passive touchmove above takes the gesture back.
+  grip.style.touchAction = hasHandle ? 'none' : 'manipulation';
+  // Long-press on a card must not raise iOS's selection callout / magnifier.
+  if (!hasHandle) el.classList.add('drag-source');
 
   return function cleanup() {
     grip.removeEventListener('pointerdown', onPointerDown);
     cleanupMove();
+    disarm();
     document.body.classList.remove('dragging');
   };
 }
@@ -970,6 +1096,9 @@ window.PriorityFlag = PriorityFlag;
 window.StatusPill = StatusPill;
 window.DueDate = DueDate;
 window.Checkbox = Checkbox;
+window.pmCoarsePointer = pmCoarsePointer;
+window.pmIsPhone = pmIsPhone;
+window.pmIsMobile = pmIsMobile;
 window.openPopover = openPopover;
 window.PopoverItem = PopoverItem;
 window.assigneePickerContent = assigneePickerContent;

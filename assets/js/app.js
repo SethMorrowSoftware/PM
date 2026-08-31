@@ -50,6 +50,8 @@
     quickAddStatus: 'todo',
     settingsOpen: false,
     mobileSidebarOpen: false,
+    // Phone-only: the collapsed topbar search is expanded into its own row.
+    mobileSearchOpen: false,
     notifOpen: false,
     shortcutsOpen: false,
     // v2 collections
@@ -566,6 +568,27 @@
   }
   window.pmClickable = clickable;
 
+  // The toolbar, topbar and several views build different DOM on phones vs.
+  // desktop (pmIsPhone() is read at build time), so a rotate or a resize that
+  // crosses a breakpoint has to trigger a rebuild — otherwise a phone rotated
+  // to landscape keeps the portrait chrome until the next unrelated render.
+  // Only breakpoint *crossings* re-render; plain resizes (and the URL-bar
+  // collapse that fires resize constantly while scrolling) are ignored.
+  (function watchBreakpoints() {
+    let last = pmIsPhone() + '|' + pmIsMobile();
+    let handle = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(handle);
+      handle = setTimeout(() => {
+        const now = pmIsPhone() + '|' + pmIsMobile();
+        if (now === last) return;
+        last = now;
+        if (!pmIsPhone()) state.mobileSearchOpen = false;
+        renderApp();
+      }, 150);
+    });
+  })();
+
   // ----- render root -----
   function renderApp() {
     if (window.innerWidth > 980 && state.mobileSidebarOpen) state.mobileSidebarOpen = false;
@@ -604,6 +627,12 @@
     // App-like bottom nav on phones — hidden while any overlay/drawer is open.
     if (!state.openTaskId && !state.quickAddOpen && !state.settingsOpen && !state.profileOpen && !state.shortcutsOpen && !state.mobileSidebarOpen) {
       rootEl.appendChild(renderMobileNav());
+    }
+    // Surfaces that live on document.body (so renderApp doesn't touch them) but
+    // mirror state can refresh here — currently the phone Filters sheet, whose
+    // rows would otherwise keep showing the values they had when it opened.
+    if (typeof window.__pmAfterRender === 'function') {
+      try { window.__pmAfterRender(); } catch (e) { console.warn('after-render hook failed:', e); }
     }
   }
 
@@ -770,7 +799,10 @@
   // ----- main area -----
   function renderMain() {
     const main = h('main', { class: 'main' });
-    main.appendChild(renderTopbar());
+    const topbar = renderTopbar();
+    main.appendChild(topbar);
+    // The phone search field expands into its own row under the bar.
+    if (topbar.__searchRow) main.appendChild(topbar.__searchRow);
     main.appendChild(renderFilters());
     const content = h('div', { class: 'content' });
     main.appendChild(content);
@@ -893,11 +925,13 @@
 
   function renderTopbar() {
     const bar = h('div', { class: 'topbar' });
+    const phone = pmIsPhone();
     bar.appendChild(h('button', {
       class: 'icon-btn mobile-nav-toggle',
       title: 'Open navigation',
+      'aria-label': 'Open navigation',
       onClick: () => { state.mobileSidebarOpen = !state.mobileSidebarOpen; renderApp(); },
-    }, Icon('list', 16)));
+    }, Icon('list', 18)));
     const proj = state.filterProject ? projectById(state.filterProject) : null;
     const viewLabels = { dashboard: 'Dashboard', kanban: 'Kanban', list: 'List', checklist: 'My tasks', calendar: 'Calendar', timeline: 'Timeline', workload: 'Workload', activity: 'Activity', goals: 'Goals' };
     bar.appendChild(h('div', { class: 'crumbs' },
@@ -907,6 +941,16 @@
       proj ? Icon('chevronRight', 12, 1.75, 'sep') : null,
       h('span', { class: 'cur' }, viewLabels[state.view] || ''),
     ));
+    // The breadcrumb trail is hidden on phones (no room), which left the bar
+    // with nothing identifying the current screen. A title takes its place —
+    // and, when a project filter is on, says so, since the filter pills that
+    // used to advertise it now live in the sheet.
+    if (phone) {
+      bar.appendChild(h('div', { class: 'topbar-title' },
+        h('span', null, viewLabels[state.view] || ''),
+        proj ? h('span', { class: 'topbar-title-sub' }, proj.name) : null,
+      ));
+    }
 
     const search = h('div', { class: 'search', style: { marginLeft: 'auto' } });
     search.appendChild(Icon('search', 14, 1.75, ''));
@@ -917,7 +961,36 @@
     });
     search.appendChild(input);
     search.appendChild(h('span', { class: 'kbd' }, navigator.platform.includes('Mac') ? '⌘K' : 'Ctrl+K'));
-    bar.appendChild(search);
+    // On a phone the search box is a permanent 250px tenant of a 390px bar —
+    // and it was still too narrow to read ("Search task…" clipped). Collapse it
+    // to an icon that expands into its own full-width row on demand.
+    const searchExpanded = phone && (state.mobileSearchOpen || !!state.search);
+    if (!phone) {
+      bar.appendChild(search);
+    } else if (!searchExpanded) {
+      bar.appendChild(h('button', {
+        class: 'icon-btn', title: 'Search tasks', 'aria-label': 'Search tasks',
+        onClick: () => {
+          state.mobileSearchOpen = true;
+          renderApp();
+          setTimeout(() => document.getElementById('global-search')?.focus(), 30);
+        },
+      }, Icon('search', 18)));
+    }
+    // renderMain() mounts this under the bar when it exists.
+    bar.__searchRow = searchExpanded
+      ? h('div', { class: 'topbar-search-row' },
+          search,
+          h('button', {
+            class: 'btn btn-muted', style: { flexShrink: 0 },
+            onClick: () => {
+              state.mobileSearchOpen = false;
+              if (state.search) { state.search = ''; }
+              renderApp();
+            },
+          }, 'Cancel'),
+        )
+      : null;
 
     // Running time-tracking timer: live elapsed chip. Ticks by updating the
     // text node only (no re-render); click opens the task, ■ stops & logs.
@@ -1001,6 +1074,7 @@
 
   function renderFilters() {
     const bar = h('div', { class: 'filters' });
+    const phone = pmIsPhone();
     const viewDef = [
       ['dashboard', 'Dashboard', 'dashboard'],
       ['kanban',    'Kanban',    'kanban'],
@@ -1023,14 +1097,59 @@
         onClick: () => { state.view = k; persist(); renderApp(); },
       }, Icon(ic, 13), h('span', { class: 'view-tab-label' }, l)));
     }
-    bar.appendChild(tabs);
+    // On phones the nine tabs live in a snapping horizontal rail rather than
+    // wrapping to three rows; the strip also auto-scrolls the active tab into
+    // view after mount so the current view is never off-screen.
+    const strip = h('div', { class: 'view-strip pm-hscroll' }, tabs);
+    bar.appendChild(strip);
+    requestAnimationFrame(() => {
+      const active = strip.querySelector('.view-tab.active');
+      if (active && strip.scrollWidth > strip.clientWidth) {
+        strip.scrollLeft = Math.max(0, active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2);
+      }
+    });
 
     if (state.view !== 'dashboard' && state.view !== 'checklist') {
       bar.appendChild(h('div', { class: 'filters-sep' }));
 
+      const { pills, utilities, count: taskCount } = buildFilterControls();
+      if (phone) bar.appendChild(filtersTrigger(taskCount));
+      else { pills.forEach(p => bar.appendChild(p)); bar.appendChild(utilities); }
+    }
+    return bar;
+  }
+
+  // Builds the filter controls (project / assignee / labels / hide-done /
+  // clear / saved views) plus the import-export-count group. Called by
+  // renderFilters() for the desktop toolbar and again, on demand, by the phone
+  // Filters sheet so the sheet can redraw itself with fresh labels after a
+  // change instead of showing stale ones.
+  function buildFilterControls() {
+    const pills = [];
+    const addPill = (el) => { pills.push(el); return el; };
+    // A filter control has to read two ways: as a compact toolbar pill on
+    // desktop ("Folder  All projects  v"), and as a full-width sheet row on a
+    // phone ("Project ................ All projects"). Same nodes either way —
+    // .fs-label only shows in the sheet, .fs-value is pushed right there.
+    // `alwaysValue` marks a control whose value stands on its own in the
+    // toolbar ("All projects", "Anyone"). The others show their category name
+    // until something is actually selected ("Labels" -> "2 labels"), which is
+    // how the toolbar has always read. The sheet shows both, either way.
+    const pill = (icon, label, value, isSet, alwaysValue = false) => h('button', {
+      class: 'filter-pill'
+        + (isSet ? ' active is-set' : '')
+        + (isSet || alwaysValue ? ' show-value' : ''),
+      'aria-label': label + ': ' + value,
+    },
+      Icon(icon, 12, 1.75, 'fs-icon'),
+      h('span', { class: 'fs-label' }, label),
+      h('span', { class: 'fs-value' }, value),
+      Icon('chevronDown', 11, 1.75, 'fs-chev'),
+    );
+
       // Project filter
       const projName = state.filterProject ? projectById(state.filterProject)?.name : 'All projects';
-      const projBtn = h('button', { class: 'filter-pill' + (state.filterProject ? ' active' : '') }, Icon('folder', 12), ' ' + projName + ' ', Icon('chevronDown', 11));
+      const projBtn = pill('folder', 'Project', projName, !!state.filterProject, true);
       projBtn.addEventListener('click', () => {
         openPopover(projBtn, ({close}) => {
           const wrap = h('div');
@@ -1044,11 +1163,11 @@
           }, close));
         });
       });
-      bar.appendChild(projBtn);
+      addPill(projBtn);
 
       // Assignee filter
       const asgLabel = state.filterAssignee ? (userById(state.filterAssignee)?.name || 'Someone') : 'Anyone';
-      const asgBtn = h('button', { class: 'filter-pill' + (state.filterAssignee ? ' active' : '') }, Icon('user', 12), ' ' + asgLabel + ' ', Icon('chevronDown', 11));
+      const asgBtn = pill('user', 'Assignee', asgLabel, !!state.filterAssignee, true);
       asgBtn.addEventListener('click', () => {
         openPopover(asgBtn, ({close}) => assigneePickerContent(
           state.filterAssignee ? [state.filterAssignee] : [],
@@ -1056,11 +1175,11 @@
           close,
         ));
       });
-      bar.appendChild(asgBtn);
+      addPill(asgBtn);
 
       // Labels
-      const lblLabel = state.filterLabels.length ? `${state.filterLabels.length} label${state.filterLabels.length > 1 ? 's' : ''}` : 'Labels';
-      const lblBtn = h('button', { class: 'filter-pill' + (state.filterLabels.length ? ' active' : '') }, Icon('tag', 12), ' ' + lblLabel + ' ', Icon('chevronDown', 11));
+      const lblLabel = state.filterLabels.length ? `${state.filterLabels.length} label${state.filterLabels.length > 1 ? 's' : ''}` : 'Any';
+      const lblBtn = pill('tag', 'Labels', lblLabel, state.filterLabels.length > 0);
       lblBtn.addEventListener('click', () => {
         openPopover(lblBtn, ({close}) => labelPickerContent(
           state.filterLabels,
@@ -1074,33 +1193,41 @@
           close, { keepOpen: true, scopeProjectId: state.filterProject },
         ));
       });
-      bar.appendChild(lblBtn);
+      addPill(lblBtn);
 
       // Completed-tasks visibility (monday-style: hidden by default). Only on
       // the views where hiding applies; a preference, so Clear doesn't reset it.
       if (HIDE_DONE_VIEWS.includes(state.view)) {
         const doneN = filteredTasks({ includeDone: true }).filter(t => t.status === 'done').length;
-        bar.appendChild(h('button', {
-          class: 'filter-pill',
+        const doneBtn = h('button', {
+          class: 'filter-pill show-value',
           'aria-pressed': state.hideDone ? 'true' : 'false',
           title: state.hideDone
             ? `${doneN} completed task${doneN === 1 ? '' : 's'} hidden — click to show`
             : 'Completed tasks are shown — click to hide them',
           onClick: () => { state.hideDone = !state.hideDone; persist(); renderApp(); },
-        }, Icon(state.hideDone ? 'eye' : 'checkCircle', 12),
-           state.hideDone ? ` Show done (${doneN}) ` : ' Hide done '));
+        }, Icon(state.hideDone ? 'eye' : 'checkCircle', 12, 1.75, 'fs-icon'),
+           h('span', { class: 'fs-label' }, 'Completed tasks'),
+           h('span', {
+             class: 'fs-value',
+             // The toolbar pill is an action ("Hide done"); the sheet row is a
+             // labelled setting, so it reads as state instead. openFiltersSheet
+             // swaps in data-sheet-value when it re-dresses the control.
+             'data-sheet-value': state.hideDone ? `Hidden (${doneN})` : 'Shown',
+           }, state.hideDone ? `Show done (${doneN})` : 'Hide done'));
+        addPill(doneBtn);
       }
 
       // Clear
       if (state.filterProject || state.filterAssignee || state.filterLabels.length) {
-        bar.appendChild(h('button', {
+        addPill(h('button', {
           class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' },
           onClick: () => { state.filterProject = null; state.filterAssignee = null; state.filterLabels = []; persist(); renderApp(); }
         }, Icon('x', 11), ' Clear'));
       }
 
       const savedViews = state.savedViews || [];
-      const svBtn = h('button', { class: 'filter-pill' }, Icon('star', 12), ' Saved views ', Icon('chevronDown', 11));
+      const svBtn = pill('star', 'Saved views', savedViews.length ? `${savedViews.length} saved` : 'None yet', false);
       svBtn.addEventListener('click', () => {
         openPopover(svBtn, ({ close }) => {
           const wrap = h('div', { style: { minWidth: '220px', padding: '4px' } });
@@ -1141,19 +1268,105 @@
           return wrap;
         });
       });
-      bar.appendChild(svBtn);
+      addPill(svBtn);
 
       // Count + import/export
       const n = filteredTasks().length;
-      bar.appendChild(h('div', { style: { marginLeft: 'auto' }, class: 'hstack' },
+      const utilities = h('div', { style: { marginLeft: 'auto' }, class: 'hstack filters-utilities' },
         h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Import tasks from CSV',
           onClick: () => { if (typeof openImport === 'function') openImport(); else toast('Import unavailable', 'error'); } }, Icon('upload', 12), ' Import'),
         h('button', { class: 'btn btn-muted', style: { fontSize: '11.5px', padding: '4px 8px' }, title: 'Export these tasks to CSV',
           onClick: () => exportTasksCsv(filteredTasks()) }, Icon('download', 12), ' Export'),
-        h('span', { style: { fontSize: '11.5px', color: 'var(--fg-3)' } }, `${n} task${n !== 1 ? 's' : ''}`),
+        h('span', { class: 'filters-count-label', style: { fontSize: '11.5px', color: 'var(--fg-3)' } }, `${n} task${n !== 1 ? 's' : ''}`),
+      );
+    return { pills, utilities, count: n };
+  }
+
+  // How many of the *scoping* filters are actually narrowing the board. Drives
+  // the badge on the phone Filters button so a filter tucked inside the sheet
+  // can't silently blank a view — the one real risk of moving them off-screen.
+  function activeFilterCount() {
+    return (state.filterProject ? 1 : 0)
+         + (state.filterAssignee ? 1 : 0)
+         + (state.filterLabels.length ? 1 : 0);
+  }
+
+  // Phone toolbar: one button in place of five wrapping pills, which is what
+  // reclaims most of the ~340px of chrome the old toolbar spent before the
+  // first task. Tapping it opens a sheet whose rows are the very same controls
+  // — same handlers, same pickers — re-dressed full width with their current
+  // value on the right, so nothing is lost but the always-on real estate.
+  function filtersTrigger(taskCount) {
+    const count = activeFilterCount();
+    const btn = h('button', {
+      class: 'filter-pill filters-trigger' + (count ? ' active' : ''),
+      'aria-label': count ? `Filters, ${count} active` : 'Filters and view options',
+      title: 'Filters',
+    }, Icon('filter', 13), ' Filters ');
+    if (count) btn.appendChild(h('span', { class: 'filters-count' }, String(count)));
+    btn.addEventListener('click', openFiltersSheet);
+    return btn;
+  }
+
+  function openFiltersSheet() {
+    const sheet = h('div', { class: 'filter-sheet' });
+    let closed = false, pendingFill = false;
+
+    // The pills are the toolbar's own controls, re-dressed as full-width rows.
+    function fill() {
+      sheet.replaceChildren();
+      const { pills, utilities, count } = buildFilterControls();
+      for (const pill of pills) {
+        pill.classList.add('filter-sheet-row');
+        pill.classList.remove('filter-pill', 'btn', 'btn-muted', 'btn-ghost');
+        const val = pill.querySelector('.fs-value[data-sheet-value]');
+        if (val) val.textContent = val.getAttribute('data-sheet-value');
+        sheet.appendChild(pill);
+      }
+      utilities.style.marginLeft = '0';
+      sheet.appendChild(h('div', { class: 'filter-sheet-foot' },
+        h('span', { style: { fontSize: '12px', color: 'var(--fg-3)', marginRight: 'auto' } },
+          `${count} task${count !== 1 ? 's' : ''} shown`),
+        utilities,
       ));
     }
-    return bar;
+
+    // Picking a filter calls renderApp(), which rebuilds the toolbar behind
+    // this sheet but not the sheet itself (it lives on document.body) — so the
+    // rows would keep showing the values they had when it opened. Redraw them
+    // on the after-render hook instead, but never while a picker is still open:
+    // the label picker stays up across several toggles, and replacing its
+    // anchor mid-selection would pull the row out from under it.
+    // isConnected is the real guard: Escape and the scrim call modal()'s own
+    // close, which the wrapper below never sees, so the hook has to notice for
+    // itself that the sheet is gone and unregister.
+    const gone = () => closed || !sheet.isConnected;
+    function scheduleFill() {
+      if (gone()) { window.__pmAfterRender = null; return; }
+      if (pendingFill) return;
+      pendingFill = true;
+      const tick = () => {
+        if (gone()) { pendingFill = false; window.__pmAfterRender = null; return; }
+        if (document.querySelector('.popover')) { requestAnimationFrame(tick); return; }
+        pendingFill = false;
+        fill();
+      };
+      requestAnimationFrame(tick);
+    }
+
+    fill();
+    const m = modal({
+      title: 'Filters',
+      body: sheet,
+      footer: h('button', { class: 'btn btn-primary', onClick: () => m.close() }, 'Done'),
+    });
+    window.__pmAfterRender = scheduleFill;
+    const origClose = m.close;
+    m.close = () => { closed = true; window.__pmAfterRender = null; origClose(); };
+    // Import / Export take over the screen — get out of their way first.
+    sheet.addEventListener('click', (e) => {
+      if (e.target.closest('.filters-utilities')) m.close();
+    });
   }
 
   // ----- quick-add modal -----
